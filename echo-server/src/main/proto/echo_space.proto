@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+// 意识空间号段：13xx（TECH-P1 §3 / §4.2）。
+option java_package = "com.echo.proto.space";
+option java_multiple_files = true;
+
+// C->S 进入（自己的）意识空间。
+message EnterSpaceReq_1301 {
+}
+
+// S->C 空间快照：客户端按 presetSetId + dynamicParams 本地拼装渲染。
+message SpaceSnapshotResp_1302 {
+  int32 code = 1;
+  int64 space_id = 2;        // 空间实例ID(雪花)
+  int64 preset_set_id = 3;   // 定势组合ID(ART.md §3, 起步 1001/1002)
+  string dynamic_params = 4; // 动态参数(json: 天气/光影/点缀)
+  string host_config = 5;    // 主控配置(json)
+  string message = 6;
+}
+
+// C->S 更新主控配置（共鸣细节）。
+message UpdateHostConfigReq_1303 {
+  bool broadcast = 1;             // 是否对外广播
+  bool async_only = 2;            // 仅异步(回声)可见
+  double resonance_threshold = 3; // 共鸣余弦距离阈值上限(越小越严格)
+  bool allow_battle = 4;          // 是否允许对赌(P3占位)
+}
+
+// S->C 更新主控配置响应。
+message UpdateHostConfigResp_1304 {
+  int32 code = 1;
+  string host_config = 2; // 更新后的主控配置(json)
+  string message = 3;
+}

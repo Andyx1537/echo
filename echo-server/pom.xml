@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.echo</groupId>
+    <artifactId>echo-server</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>echo-server</name>
+    <description>回响 (Echo) 后端业务工程，构建于 Aengine 引擎之上（BE-1 脚手架）</description>
+
+    <properties>
+        <maven.compiler.release>26</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 引擎支援：作为被依赖的库引入，不修改其源码 -->
+        <aengine.version>1.0-RELEASE</aengine.version>
+
+        <!-- 以下版本与 Aengine/pom.xml 对齐，统一最新稳定版 -->
+        <lombok.version>1.18.38</lombok.version>
+        <slf4j.version>2.0.17</slf4j.version>
+        <logback.version>1.5.18</logback.version>
+        <gson.version>2.14.0</gson.version>
+        <protobuf.version>4.35.0</protobuf.version>
+
+        <!-- 单库 PostgreSQL（含 pgvector）：业务关系实体 + 向量都落 PG -->
+        <postgresql.version>42.7.7</postgresql.version>
+        <!-- HikariCP 连接池版本与 Aengine 对齐 -->
+        <hikaricp.version>6.3.0</hikaricp.version>
+
+        <!-- 测试栈，与 Aengine 对齐 -->
+        <junit.version>5.12.2</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+        <mockito.version>5.23.0</mockito.version>
+        <!-- 显式钉住 ByteBuddy 以支持 JDK 26 字节码 -->
+        <bytebuddy.version>1.18.10</bytebuddy.version>
+
+        <maven-compiler-plugin.version>3.15.0</maven-compiler-plugin.version>
+        <surefire.version>3.5.6</surefire.version>
+
+        <!-- protobuf 代码生成：protoc 由插件从 Maven Central 下载，无需系统安装 protoc -->
+        <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
+        <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
+    </properties>
+
+    <dependencies>
+        <!-- 引擎支援：network(Netty/WebSocket) + persistence(注解/元数据/缓存层) + event + scheduler + template + cache + util。
+             架构 B'：单库 PostgreSQL，不使用 Aengine 的 MySQL 驱动，故排除其传递带入的 mysql-connector-j。 -->
+        <dependency>
+            <groupId>com.aengine</groupId>
+            <artifactId>Aengine</artifactId>
+            <version>${aengine.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Lombok: 消除手写 getter/setter 等样板代码 -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- 日志: SLF4J + logback -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+
+        <!-- JSON 工具 -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>${gson.version}</version>
+        </dependency>
+
+        <!-- 协议: protobuf（与 Aengine 同大版本 4.x） -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>${protobuf.version}</version>
+        </dependency>
+
+        <!-- 单库 PostgreSQL：JDBC 驱动 + HikariCP 连接池（com.echo.infra.persistence 自建 PG 方言持久化层）。
+             pgvector 向量列由 IVectorStore 通道处理（本期 mock），仅在 schema.sql 体现表结构。 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikaricp.version}</version>
+        </dependency>
+
+        <!-- 测试: JUnit5 + AssertJ + Mockito -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy</artifactId>
+            <version>${bytebuddy.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy-agent</artifactId>
+            <version>${bytebuddy.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>echo-server</finalName>
+        <!--
+            os-maven-plugin 作为构建扩展运行，探测操作系统并注入 ${os.detected.classifier}，
+            供 protobuf-maven-plugin 选择对应平台的 protoc 可执行包。
+        -->
+        <extensions>
+            <extension>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>${os-maven-plugin.version}</version>
+            </extension>
+        </extensions>
+        <plugins>
+            <!--
+                protobuf 代码生成：从 src/main/proto 编译 .proto 到
+                target/generated-sources/protobuf/java（自动加入编译路径）。
+                protoc 以 Maven 依赖形式下载（com.google.protobuf:protoc:<ver>:exe:<classifier>），
+                环境无需预装 protoc。
+            -->
+            <plugin>
+                <groupId>org.xolstice.maven.plugins</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <version>${protobuf-maven-plugin.version}</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+                    <checkStaleMillis>10000</checkStaleMillis>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven-compiler-plugin.version}</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${surefire.version}</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

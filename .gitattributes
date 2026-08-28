@@ -1,0 +1,38 @@
+# 行尾统一为 LF。
+#
+# 🔴 为什么需要这份文件（2026-08-26 立）：
+# 此前仓库既没有 .gitattributes 也没设 core.autocrlf，而索引里 281 个源文件中
+# 有 279 个存的是 CRLF 字节。团队全在 macOS 上，工具链默认写 LF，于是任何一次
+# 「整体重写某个文件」都会把 CRLF 换成 LF，git 随即把整个文件报成改写。
+#
+# 实证：2026-08-25 一次批量脚本把七个文件的行尾换掉，提交看起来重写了 1814 行，
+# 而真实改动只有 224 增 58 删——真实改动被淹没在噪音里，评审时根本看不出改了什么。
+#
+# 归一到 LF 而不是 CRLF：CRLF 是首次提交时意外带进来的，与平台不符。
+
+* text=auto eol=lf
+
+# —— 二进制：永不做行尾转换，也不做 diff ——
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.jar   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.mp4   binary
+*.mp3   binary
+*.wav   binary
+
+# —— Unity ——
+# echo-client 用的是 Force Text 序列化，.unity/.asset/.meta/.prefab 都是 YAML 文本，
+# 交给上面的 text=auto 正常处理即可。这里只声明 Unity 自己的合并工具偏好。
+*.unity  merge=unityyamlmerge
+*.prefab merge=unityyamlmerge
+*.asset  merge=unityyamlmerge

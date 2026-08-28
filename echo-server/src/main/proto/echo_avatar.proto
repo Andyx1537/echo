@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+// 形象号段：11xx（TECH-P1 §3）。本期仅占位定义消息体，未实现 handler。
+option java_package = "com.echo.proto.avatar";
+option java_multiple_files = true;
+
+// C->S 更新形象。
+message UpdateAvatarReq_1101 {
+  string parts = 1;         // 部位组合(json)
+  string fashion_slots = 2; // 时装槽位(json)
+}
+
+// S->C 更新形象响应。
+message UpdateAvatarResp_1102 {
+  int32 code = 1;
+  string message = 2;
+}

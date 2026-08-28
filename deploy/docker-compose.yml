@@ -1,0 +1,37 @@
+# 回响 (Echo) · P1 数据库：PostgreSQL 16 + pgvector
+#
+# 首选启动方式（本机装有 Docker 时）：
+#   cd Echo/deploy
+#   docker compose up -d
+#   # 等健康检查通过后初始化 schema：
+#   docker compose exec -T db psql -U echo -d echo < ../echo-server/src/main/resources/sql/schema.sql
+#
+# 说明：
+#   - 镜像 pgvector/pgvector:pg16 已内置 pgvector 扩展（schema.sql 里的 CREATE EXTENSION vector 可直接执行）。
+#   - 库名 echo / 账号 echo / 密码 echo / 端口 5432，与 Echo/deploy/echo-db.properties 一致。
+#   - 数据持久化到命名卷 echo-pgdata。
+#
+# 注意：本机当前未安装 Docker，实际验证走的是 RUNBOOK.md 的「方案 B：brew 原生 PostgreSQL」。
+# 本文件供有 Docker 的同学一键起库使用，两种方式产出的库结构/连接参数完全一致。
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: echo-pg
+    environment:
+      POSTGRES_USER: echo
+      POSTGRES_PASSWORD: echo
+      POSTGRES_DB: echo
+    ports:
+      - "5432:5432"
+    volumes:
+      - echo-pgdata:/var/lib/postgresql/data
+      # 容器首次初始化时自动执行 schema（含 CREATE EXTENSION vector + 建表 + vector(768) 列）
+      - ../echo-server/src/main/resources/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echo -d echo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  echo-pgdata:

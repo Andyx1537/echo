@@ -1,0 +1,44 @@
+# ===== 机密：绝不入库 =====
+# .env.local 内含真实可用的付费 API key
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ===== 用户素材：隐私，绝不入库 =====
+# 上传的照片/音视频属敏感个人信息（见 echo-doc 仓 docs/SPEC-trust-and-compliance）
+echo-server/data/
+uploads/
+
+# ===== 本地数据库集群 =====
+deploy/pgdata/
+deploy/pglogs/
+*.pid
+
+# ===== 构建产物 =====
+target/
+build/
+out/
+*.class
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# ===== 仓库备份包 =====
+*.bundle
+
+# ===== 日志与临时文件 =====
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

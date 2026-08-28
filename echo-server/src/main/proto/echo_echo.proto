@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+// 回声号段：15xx（TECH-P1 §3 / §4.3，P1 异步）。
+option java_package = "com.echo.proto.echo";
+option java_multiple_files = true;
+
+// C->S 拉取某空间下的回声（异步快照/留痕）。
+message PullEchoesReq_1501 {
+  int64 owner_space_id = 1; // 目标空间ID(MindSpace.id)
+}
+
+// 回声快照。
+message EchoSnapshot {
+  int64 echo_id = 1;
+  int64 from_account_id = 2; // 留痕来源账号
+  string payload = 3;        // 回声内容(json: 痕迹/手势/信物)
+  int64 expire_at = 4;       // 过期时间(ms)
+}
+
+// S->C 回声列表。
+message EchoListResp_1502 {
+  int32 code = 1;
+  repeated EchoSnapshot echoes = 2;
+  string message = 3;
+}
+
+// C->S 留痕/手势信物（在某空间留下回声）。
+message LeaveTraceReq_1503 {
+  int64 owner_space_id = 1; // 目标空间ID
+  string payload = 2;       // 回声内容(json)
+  int64 ttl_millis = 3;     // 存活时长(ms, <=0 用默认)
+}
+
+// S->C 留痕响应。
+message LeaveTraceResp_1504 {
+  int32 code = 1;
+  int64 echo_id = 2;
+  int64 expire_at = 3;
+  string message = 4;
+}

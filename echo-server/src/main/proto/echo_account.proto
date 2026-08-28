@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+// 账号号段：10xx（TECH-P1 §3）。
+// 消息类名以 `_<消息号>` 结尾，匹配 Aengine NetworkUtil.getMessageID 的解析约定。
+option java_package = "com.echo.proto.account";
+option java_multiple_files = true;
+
+// C->S 登录请求（登录前无身份，需放入 @IPacketHandler.noNeedCheckMessage 白名单）。
+message LoginReq_1001 {
+  string open_id = 1;        // 外部登录态唯一标识
+  string client_version = 2; // 客户端版本（可选，便于灰度）
+}
+
+// S->C 登录响应。
+message LoginResp_1002 {
+  int32 code = 1;        // 0=成功，非0=失败码
+  int64 account_id = 2;  // 账号ID（雪花）
+  bool new_account = 3;  // 是否本次新建账号
+  string message = 4;    // 提示信息
+}

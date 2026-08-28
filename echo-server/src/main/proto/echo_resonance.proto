@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+// 共鸣号段：14xx（TECH-P1 §3 / §4.3）。
+option java_package = "com.echo.proto.resonance";
+option java_multiple_files = true;
+
+// C->S 查询共鸣候选。top_n/threshold 为 0 时服务端用默认值。
+message QueryResonanceReq_1401 {
+  int32 top_n = 1;     // 返回数量上限(<=0 用默认)
+  double threshold = 2; // 余弦距离阈值上限(<=0 用默认)
+}
+
+// 共鸣候选项。
+message ResonanceCandidate {
+  int64 account_id = 1; // 候选账号ID
+  double score = 2;     // 余弦距离(越小越相似)
+}
+
+// S->C 共鸣候选列表。
+message ResonanceListResp_1402 {
+  int32 code = 1;
+  repeated ResonanceCandidate candidates = 2;
+  string message = 3;
+}

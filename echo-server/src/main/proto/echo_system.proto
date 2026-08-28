@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+// 系统/心跳号段：90xx（TECH-P1 §3 / §3.1）。
+option java_package = "com.echo.proto.system";
+option java_multiple_files = true;
+
+// C->S 心跳：连接保活。客户端默认每 15s 发一次（§3.1）。
+// 放入 @IPacketHandler.noNeedCheckMessage 白名单：心跳是连接级保活、非业务操作，
+// 登录前后均可发送，不依赖会话身份。
+message Heartbeat_9001 {
+  int64 client_time = 1; // 客户端时间戳(ms)，便于粗略测 RTT
+}
+
+// S->C 心跳应答。
+message HeartbeatAck_9002 {
+  int64 server_time = 1; // 服务端时间戳(ms)
+}

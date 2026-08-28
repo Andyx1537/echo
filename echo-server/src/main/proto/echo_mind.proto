@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+// 意识档案号段：12xx（TECH-P1 §3）。本期仅占位定义消息体，未实现 handler。
+option java_package = "com.echo.proto.mind";
+option java_multiple_files = true;
+
+// C->S 提交偏好（触发 LLM 补全 + 向量生成）。
+message SubmitPrefsReq_1201 {
+  repeated string raw_prefs = 1; // 用户自拟偏好标签/碎片
+}
+
+// S->C 意识档案响应。
+message MindProfileResp_1202 {
+  int32 code = 1;
+  int64 profile_id = 2;    // 意识档案ID
+  int64 vector_id = 3;     // 个人向量ID
+  string enriched_prefs = 4; // LLM 补全偏好(json)
+  string message = 5;
+}
