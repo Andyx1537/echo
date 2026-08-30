@@ -1284,3 +1284,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_source_card"
 -- 按来源拆分口径（北极星分母、官方号观测），与 t_memory_card 的同名索引对齐。
 CREATE INDEX IF NOT EXISTS "t_work_idx_origin_reviewed"
     ON "t_work" ("originType", "reviewedAt") WHERE "reviewedAt" IS NOT NULL;
+
+-- ============================================================
+-- 素材归属（t_resource）
+-- ============================================================
+-- 🔴 补的是一个「本来就该有、但一直没有」的东西：POST /upload 此前只把
+-- accountId 打进日志就扔了，全库没有任何一张表知道某个 resourceId 是谁传的。
+-- 后果是 POST /works 无从校验 mediaKey 归属——拿到别人的 key 就能把别人的
+-- 照片发布成自己的作品（SPEC-security §4.14 E4）。
+--
+-- 它同时是下架的前置：IStorage 至今没有 delete 方法，软删只改数据库状态、
+-- 字节永远在盘上（同上 E1）。要做到「下架即不可取」，得先知道有哪些 key。
+CREATE TABLE IF NOT EXISTS "t_resource" (
+    "resourceId"  varchar(64)  NOT NULL,
+    "ownerId"     bigint       NOT NULL,
+    "storageKey"  varchar(256) NOT NULL DEFAULT '',
+    "contentType" varchar(128) NOT NULL DEFAULT '',
+    "bytes"       bigint       NOT NULL DEFAULT 0,
+    "createdAt"   bigint       NOT NULL DEFAULT 0,
+    -- 吊销时刻。置上之后读取面应当拒绝，字节的物理清除另行排期。
+    "revokedAt"   bigint,
+    PRIMARY KEY ("resourceId"),
+    CONSTRAINT "t_resource_fk_owner" FOREIGN KEY ("ownerId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS "t_resource_idx_owner"
+    ON "t_resource" ("ownerId", "createdAt" DESC);
+
+-- 反查：从存储键找回归属，下架与审计都要走这条。
+CREATE INDEX IF NOT EXISTS "t_resource_idx_key"
+    ON "t_resource" ("storageKey");

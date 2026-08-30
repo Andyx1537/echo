@@ -27,6 +27,7 @@ import com.echo.http.store.InMemoryModerationStore;
 import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
+import com.echo.http.work.ResourceStore;
 import com.echo.http.work.WorkStore;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
@@ -147,8 +148,13 @@ public final class EchoHttpBootstrap {
         // 作品域（主线第 10 步）。此前服务端没有任何创建可发布内容的入口，
         // 审核与分发整条下游只能处理测试代码手动塞进去的数据，见
         // PRODUCT-IMPLEMENTATION-AUDIT §0。
-        WorksApi worksApi = new WorksApi(new WorkStore(pgDb), store, storage, safetyGate, idGenerator);
+        // 素材归属由上传口与发布口共用一份，不要各造一个：两份实例在内存态下
+        // 各持一张 Map，上传记在 A、发布查 B，校验会永远不通过。
+        ResourceStore resourceStore = new ResourceStore(pgDb);
+        WorksApi worksApi = new WorksApi(new WorkStore(pgDb), store, storage, resourceStore,
+                safetyGate, idGenerator);
         worksApi.setBlockService(blockService);
+        worksApi.setCardStore(moderationStore);
         worksApi.register(router);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
@@ -188,7 +194,7 @@ public final class EchoHttpBootstrap {
                 new LinkedBlockingQueue<>(256),
                 new NamedThreadFactory("echo-http"));
 
-        HttpGateway gateway = new HttpGateway(port, router, store, storage, executor);
+        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor);
         try {
             gateway.start();
         } catch (Exception e) {

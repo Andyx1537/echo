@@ -44,15 +44,19 @@ public final class HttpGateway {
     private final Router router;
     private final com.echo.http.store.EchoStore store;
     private final IStorage storage;
+    /** 素材归属。上传时落一条，发布时据此判 mediaKey 是不是本人的。 */
+    private final com.echo.http.work.ResourceStore resources;
     private final ExecutorService executor;
     private HttpServer server;
 
     public HttpGateway(int port, Router router, com.echo.http.store.EchoStore store,
-                       IStorage storage, ExecutorService executor) {
+                       IStorage storage, com.echo.http.work.ResourceStore resources,
+                       ExecutorService executor) {
         this.port = port;
         this.router = router;
         this.store = store;
         this.storage = storage;
+        this.resources = resources;
         this.executor = executor;
     }
 
@@ -181,6 +185,15 @@ public final class HttpGateway {
         }
         String resourceId = String.valueOf(java.util.UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE);
         IStorage.Stored stored = storage.put(resourceId, data, ct, filename);
+        // 🔴 归属必须落库，此前这里只有一行日志——日志查不了，于是 POST /works
+        //    无从判断 mediaKey 是不是本人的（SPEC-security §4.14 E4）。
+        //    记不上就拒绝：放行等于给出一条「把写入打挂 → 后续 key 全部无主」的路。
+        if (!resources.record(stored.resourceId(), accountId, stored.key(), ct, data.length,
+                System.currentTimeMillis())) {
+            writeError(exchange, 500, ApiException.SERVER_ERROR,
+                    "素材没能存好，再试一次好吗？", "resource ownership not recorded");
+            return;
+        }
         log.info("[upload] accountId={}, key={}, size={}B", accountId, stored.key(), data.length);
         writeOk(exchange, Map.of("resourceId", stored.resourceId(), "url", stored.url()));
     }

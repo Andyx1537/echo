@@ -49,21 +49,31 @@ public final class WorksApi {
     private final WorkStore store;
     private final EchoStore accounts;
     private final IStorage storage;
+    /** 素材归属。发布时据此判 mediaKey / posterKey 是不是本人上传的。 */
+    private final com.echo.http.work.ResourceStore resources;
     private final IDGenerator idGenerator;
     private final OutputSafetyGate safetyGate;
     private BlockService blockService;
+    /** 卡归属。从回忆卡发布时判这张卡是不是本人的。 */
+    private com.echo.http.store.ModerationStore cards;
 
     public WorksApi(WorkStore store, EchoStore accounts, IStorage storage,
+                    com.echo.http.work.ResourceStore resources,
                     OutputSafetyGate safetyGate, IDGenerator idGenerator) {
         this.store = store;
         this.accounts = accounts;
         this.storage = storage;
+        this.resources = resources;
         this.safetyGate = safetyGate;
         this.idGenerator = idGenerator;
     }
 
     public void setBlockService(BlockService blockService) {
         this.blockService = blockService;
+    }
+
+    public void setCardStore(com.echo.http.store.ModerationStore cards) {
+        this.cards = cards;
     }
 
     public void register(Router r) {
@@ -99,6 +109,15 @@ public final class WorksApi {
             throw new ApiException(ApiException.BAD_PARAM, "还没选素材呢。", "empty mediaKey");
         }
 
+        // 🔴 素材必须是本人上传的。此前只判非空，于是拿到别人的 key 就能把别人的
+        //    照片发布成自己的作品（SPEC-security §4.14 E4）。key 本身猜不出来，
+        //    但不需要猜——作品瀑布把完整直链下发给任何持游客 token 的人（同上 E5）。
+        //    统一回 400 而不区分「不存在 / 不是你的」，区分开来等于确认这个 key 存在。
+        if (!resources.ownedBy(mediaKey, me)) {
+            throw new ApiException(ApiException.BAD_PARAM, "这份素材找不到了，重新选一次好吗？",
+                    "mediaKey not owned by " + me);
+        }
+
         boolean video = Work.MediaType.VIDEO.equals(mediaType);
         String posterKey = Json.getString(b, "posterKey", "").trim();
         // 🔴 与 t_work_ck_video_poster 同一条规则，在这里挡是为了给出人话，
@@ -106,6 +125,11 @@ public final class WorksApi {
         if (video && posterKey.isEmpty()) {
             throw new ApiException(ApiException.BAD_PARAM, "视频还没生成封面，稍等一下再发？",
                     "video requires posterKey");
+        }
+        // 首帧也要判归属，否则封面这条路径就是 E4 的一个漏口。
+        if (video && !resources.ownedBy(posterKey, me)) {
+            throw new ApiException(ApiException.BAD_PARAM, "封面对不上，重新生成一下？",
+                    "posterKey not owned by " + me);
         }
         int durationMs = Json.getInt(b, "durationMs", 0);
         if (video && durationMs > MAX_DURATION_MS) {
@@ -126,6 +150,21 @@ public final class WorksApi {
         }
 
         Long sourceCardId = parseNullableId(Json.getString(b, "sourceCardId", ""));
+        // 🔴 判重之前先判归属。publishedFromCard 只回答「这张卡发过没有」，
+        //    它<b>不</b>回答「这张卡是不是你的」——两个问题长得像，答错一个
+        //    就等于允许把别人的回忆卡发成自己的作品（SPEC-security §4.14 E4 相关项）。
+        if (sourceCardId != null) {
+            if (cards == null) {
+                // 没装配就不许走这条路：静默放行等于校验形同虚设。
+                throw new ApiException(ApiException.SERVER_ERROR, "现在发不了，稍后再试？",
+                        "card store not wired");
+            }
+            var card = cards.card(sourceCardId);
+            if (card == null || card.ownerId != me) {
+                throw new ApiException(ApiException.BAD_PARAM, "这张卡找不到了。",
+                        "card " + sourceCardId + " not owned by " + me);
+            }
+        }
         if (sourceCardId != null && store.publishedFromCard(sourceCardId)) {
             // 🔴 这一条要给明确回执，不能静默成功：作者以为没发出去会再发一次，
             //    而他看不到自己已经发过的那一条（它还在审核里）
