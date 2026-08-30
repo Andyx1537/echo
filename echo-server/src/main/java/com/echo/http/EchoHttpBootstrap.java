@@ -27,6 +27,7 @@ import com.echo.http.store.InMemoryModerationStore;
 import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
+import com.echo.http.work.WorkStore;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
 import com.echo.infra.llm.ILlmClient;
@@ -142,6 +143,13 @@ public final class EchoHttpBootstrap {
         // 开关能不能打开由 FeatureSwitchService 的就绪校验说话，这里只负责把端点挂上。
         new LeaveWordsApi(new LeaveWordsStore(pgDb), moderationStore, store, governanceApi,
                 switches, safetyGate, idGenerator).register(router);
+
+        // 作品域（主线第 10 步）。此前服务端没有任何创建可发布内容的入口，
+        // 审核与分发整条下游只能处理测试代码手动塞进去的数据，见
+        // PRODUCT-IMPLEMENTATION-AUDIT §0。
+        WorksApi worksApi = new WorksApi(new WorkStore(pgDb), store, storage, safetyGate, idGenerator);
+        worksApi.setBlockService(blockService);
+        worksApi.register(router);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
         logGovernanceReadiness(capabilities, switches);
