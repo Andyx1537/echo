@@ -97,9 +97,16 @@ public final class EchoHttpBootstrap {
         ITrainingCorpus trainingCorpus = new InMemoryTrainingCorpus();
         // seedDemoRelations=!persistent：仅内存态联调给新游客铺演示亲友（mi-D），持久化模式不种。
         EchoApi api = new EchoApi(store, idGenerator, effectiveLlm, vision, accountService, trainingCorpus, !persistent);
-        // dev-only 路由（如 DELETE /pet/me resetPet，mi-2）仅在内存态联调模式挂载；生产（PG 落库）关闭。
-        // 也可用 -Decho.devRoutes=true 显式开启。
-        boolean devRoutes = !persistent || Boolean.parseBoolean(System.getProperty("echo.devRoutes", "false"));
+        // dev-only 路由（如 DELETE /pet/me resetPet，mi-2）只认显式开关。
+        //
+        // 🔴 这里此前是 devRoutes = !persistent || <显式开关>，即**数据库连不上时自动挂载**。
+        //    那是 fail-open：故障状态反而多给了权限，而生产环境 PG 抖一下就会落到这条分支上。
+        //    「连不上库」和「这是开发机」是两件事，不能用同一个布尔量表示。
+        //    代价是本地无 PG 联调要多带 -Decho.devRoutes=true，见 deploy/RUNBOOK.md。
+        boolean devRoutes = Boolean.parseBoolean(System.getProperty("echo.devRoutes", "false"));
+        if (!persistent && !devRoutes) {
+            log.warn("[bootstrap] 内存态启动但未开 dev 路由；本地联调需要 resetPet 等端点时加 -Decho.devRoutes=true");
+        }
         Router router = api.routes(devRoutes);
 
         // 审核/申诉/举报 8 端点（API-CONTRACT §17）。落库模式走 PG（双流水同事务由 PgDb.inTransaction 保证），

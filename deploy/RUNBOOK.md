@@ -224,3 +224,19 @@ rm -rf $DEPLOY/pgdata
 
 7. **`make install`（pgvector）写 `/opt/homebrew` 失败**
    确保对 Homebrew 目录有写权限（`brew` 正常可用即可）。
+
+## dev-only 路由开关（`echo.devRoutes`）
+
+`DELETE /pet/me`（整只宠物重置）等联调端点**只在显式开启时挂载**：
+
+```bash
+java -Decho.devRoutes=true -jar echo-server.jar
+```
+
+🔴 **2026-08-30 改过一次，行为变了。** 此前是 `devRoutes = !persistent || <显式开关>`，
+即**数据库连不上时自动挂载**——生产环境 PG 抖一下就会把重置端点暴露出去。
+这是 fail-open：故障状态反而多给权限。「连不上库」和「这是开发机」是两件事，
+不能用同一个布尔量表示。
+
+**对本地联调的影响**：以前不连 PG 就自动有这些端点，现在要自己带参数。
+内存态启动且未开开关时，日志里会有一条 `[bootstrap]` 警告提示怎么开。
