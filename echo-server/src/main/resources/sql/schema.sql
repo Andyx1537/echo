@@ -1187,3 +1187,100 @@ CREATE INDEX IF NOT EXISTS "t_report_idx_target"
 --
 -- 🔴 全局关 > 单条开：单条 interaction 只能**关**，不能反向打开一个被全局开关关掉的能力。
 --    判定顺序写在 InteractionPolicy 里，不在这张表上——表只存作者意图。
+
+-- ============================== 作品（t_work） ==============================
+-- 规格真源：SPEC-works.md（2026-08-30 新建）。
+--
+-- 🔴 作品与回忆卡是**两个模型**，不要因为字段像就合并。区别在「谁让它存在」：
+--   - 回忆卡（t_memory_card）是**私域产物**：AI 生成的近况、用户随手记、生命之书页，
+--     它在用户没做任何事的情况下也会长出来，默认私密。
+--   - 作品（t_work）是**公开物**：作者亲手挑了素材、写了字、按了发布。
+--     它不会自己长出来，每一条都对应一次明确的作者意图。
+--
+-- 两者由 "sourceCardId" 连接：作者把一张回忆卡「发出去」，就长出一个作品，
+-- 外键记住它的来路。用户自制上传的作品没有来路，该列为 NULL。
+--
+-- ⚠️ 建表顺序：t_account、t_memory_card 必须已存在（本表两个外键都指向它们）。
+
+CREATE TABLE IF NOT EXISTS "t_work" (
+    "id"           bigint       NOT NULL,
+    "authorId"     bigint       NOT NULL DEFAULT 0,
+    -- 来路：由哪张回忆卡发出。自制上传为 NULL——🔴 NULL 是合法值，不要补默认 0，
+    -- 0 会被误当成"指向 id=0 的卡"，而外键在 0 上查不到行时报的错跟"没来路"是两回事。
+    "sourceCardId" bigint,
+    "mediaType"    varchar(16)  NOT NULL DEFAULT 'image',   -- image | video
+    "mediaKey"     varchar(256) NOT NULL DEFAULT '',        -- POST /upload 返回的 resourceId
+    -- 视频首帧。🔴 图片作品留空，不要拿 mediaKey 顶替：前端要靠这一列判断
+    -- "该渲染 <img> 还是带 poster 的 <video>"，两列同值会让判断退化成猜 mediaType。
+    "posterKey"    varchar(256) NOT NULL DEFAULT '',
+    "durationMs"   integer      NOT NULL DEFAULT 0,         -- 视频时长；图片为 0
+    -- 原始宽高，由客户端上传时读出后带上。🔴 存真实尺寸而不是 'tall'/'short' 档位：
+    -- 瀑布流的高低错落是**渲染决定**，不同列数下同一张图该占的行高不一样，
+    -- 档位在服务端定死等于把布局焊进数据，改版面就要洗数据。
+    "width"        integer      NOT NULL DEFAULT 0,
+    "height"       integer      NOT NULL DEFAULT 0,
+    "title"        varchar(64)  NOT NULL DEFAULT '',        -- ≤30 字，应用层校验
+    "body"         text,                                    -- ≤500 字，入库前过《温柔词表》
+    "topicIds"     jsonb,                                   -- 主题标签 id 数组（0–3）
+    "visibility"   varchar(16)  NOT NULL DEFAULT 'private', -- private | friends | public
+    "status"       varchar(16)  NOT NULL DEFAULT 'draft',
+    -- 与 t_memory_card.originType 同口径（G-1 前置闸门）：无默认值，漏写则报错。
+    "originType"   varchar(16)  NOT NULL,                   -- user | official
+    -- 🔴 AI 生成标识**独立成列，不从 sourceCardId join 推导**。三个理由：
+    --   1. 自制上传路径下 sourceCardId 为 NULL，join 无从判断，而"AI 直接生成的作品"
+    --      恰恰可能不经过中间那张卡；
+    --   2. join 出来的事实会随被 join 行变化——来路卡被删了，作品就不是 AI 生成的了？
+    --      那是**一句假话**，而这句假话是对监管说的；
+    --   3. S-8 要求的显式标识要在列表页每一条上都渲染，列表查询不该为了它去 join。
+    "aiGenerated"  boolean      NOT NULL DEFAULT false,
+    "createdAt"    bigint       NOT NULL DEFAULT 0,
+    "updatedAt"    bigint       NOT NULL DEFAULT 0,
+    "publishedAt"  bigint,                                  -- 作者点发布的时刻
+    "reviewedAt"   bigint,                                  -- 首次过审时刻，只写一次
+    -- 软删三列（G0-1）。🔴 作品是用户内容，一律软删，禁止物理删。
+    "deletedAt"    bigint,
+    "deletedBy"    bigint,
+    "deleteReason" varchar(64),
+    PRIMARY KEY ("id"),
+    CONSTRAINT "t_work_ck_media_type"
+        CHECK ("mediaType" IN ('image','video')),
+    CONSTRAINT "t_work_ck_visibility"
+        CHECK ("visibility" IN ('private','friends','public')),
+    CONSTRAINT "t_work_ck_status"
+        CHECK ("status" IN ('draft','pending','public','rejected','takendown','appealing','deleted')),
+    CONSTRAINT "t_work_ck_origin_type"
+        CHECK ("originType" IN ('user','official')),
+    -- 🔴 视频必须有首帧。没有首帧的视频在瀑布流里是一块黑，用户不知道点不点得下去；
+    --    而这个缺失在单条预览时看不出来（<video> 会自己抽一帧），只在列表页暴露。
+    CONSTRAINT "t_work_ck_video_poster"
+        CHECK ("mediaType" <> 'video' OR "posterKey" <> ''),
+    CONSTRAINT "t_work_fk_author" FOREIGN KEY ("authorId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_work_fk_source_card" FOREIGN KEY ("sourceCardId")
+        REFERENCES "t_memory_card" ("id") ON DELETE RESTRICT
+);
+
+-- 作品瀑布：按发布时间倒序取公开作品。id 兜底保证顺序稳定，理由同 t_memory_card。
+CREATE INDEX IF NOT EXISTS "t_work_idx_public_published"
+    ON "t_work" ("publishedAt" DESC, "id" DESC)
+    WHERE "status" = 'public' AND "deletedAt" IS NULL;
+
+-- 个人作品页：某作者的全部作品（含未公开的，作者自己看得到）。
+CREATE INDEX IF NOT EXISTS "t_work_idx_author_published"
+    ON "t_work" ("authorId", "publishedAt" DESC, "id" DESC)
+    WHERE "deletedAt" IS NULL;
+
+-- 来路反查：这张回忆卡被发布成作品了吗（发布页要据此显示"已发布"而不是再给一个发布按钮）。
+CREATE INDEX IF NOT EXISTS "t_work_idx_source_card"
+    ON "t_work" ("sourceCardId") WHERE "sourceCardId" IS NOT NULL AND "deletedAt" IS NULL;
+
+-- 🔴 一张回忆卡只能发出一个未删除的作品（S-7 局部唯一）。
+--    带 deletedAt IS NULL：作者删掉作品之后应当还能重新发一次，无条件唯一会把
+--    「这张卡我永远只能发一次」写死。
+CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_source_card"
+    ON "t_work" ("sourceCardId")
+    WHERE "sourceCardId" IS NOT NULL AND "deletedAt" IS NULL;
+
+-- 按来源拆分口径（北极星分母、官方号观测），与 t_memory_card 的同名索引对齐。
+CREATE INDEX IF NOT EXISTS "t_work_idx_origin_reviewed"
+    ON "t_work" ("originType", "reviewedAt") WHERE "reviewedAt" IS NOT NULL;
