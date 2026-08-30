@@ -1,14 +1,14 @@
 # 回响 (Echo) · P1 数据库：PostgreSQL 16 + pgvector
 #
 # 首选启动方式（本机装有 Docker 时）：
-#   cd Echo/deploy
+#   cd echo/deploy
 #   docker compose up -d
 #   # 等健康检查通过后初始化 schema：
 #   docker compose exec -T db psql -U echo -d echo < ../echo-server/src/main/resources/sql/schema.sql
 #
 # 说明：
 #   - 镜像 pgvector/pgvector:pg16 已内置 pgvector 扩展（schema.sql 里的 CREATE EXTENSION vector 可直接执行）。
-#   - 库名 echo / 账号 echo / 密码 echo / 端口 5432，与 Echo/deploy/echo-db.properties 一致。
+#   - 库名 echo / 账号 echo / 密码 echo / 端口 5432，与 deploy/echo-db.properties 一致。
 #   - 数据持久化到命名卷 echo-pgdata。
 #
 # 注意：本机当前未安装 Docker，实际验证走的是 RUNBOOK.md 的「方案 B：brew 原生 PostgreSQL」。

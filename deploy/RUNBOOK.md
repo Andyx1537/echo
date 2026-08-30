@@ -5,7 +5,7 @@
 > 本手册经本机实测跑通（macOS / arm64 / JDK26）。本机**未安装 Docker**，所以实测走的是
 > **方案 B（brew 原生 PostgreSQL）**；有 Docker 的同学可用**方案 A**，两者库结构与连接参数完全一致。
 
-新增/相关文件（均在 `Echo/deploy/`）：
+新增/相关文件（均在 `deploy/`）：
 
 | 文件 | 作用 |
 |---|---|
@@ -162,7 +162,7 @@ echo $! > $DEPLOY/.echo-server.pid     # 记下 PID 便于停服
 另开一个终端（无需 JDK 环境，纯 Python 标准库）：
 
 ```bash
-cd /Users/andy/Documents/workSpace/Echo/deploy
+cd /Users/andy/Documents/workSpace/echo/deploy
 python3 smoke_p1.py                       # 默认连 127.0.0.1:9001
 # 或：python3 smoke_p1.py --host 127.0.0.1 --port 9001
 ```
