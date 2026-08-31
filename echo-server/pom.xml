@@ -16,7 +16,14 @@
         <maven.compiler.release>26</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <!-- 引擎支援：作为被依赖的库引入，不修改其源码 -->
+        <!--
+          引擎支援。🔴 2026-08-31 起改为 reactor 内的兄弟模块（见根 pom.xml），
+          源码即依赖。此前这里写的是「作为被依赖的库引入，不修改其源码」——
+          那条约定随 M-6（持久化统一到引擎）作废：现在扩引擎就是本项目的正经工作。
+
+          改的直接原因是本地 ~/.m2 里那个 jar 停在 2026-06-26，
+          而引擎源码已有 33 个生产文件比它新，且没有任何东西会报这个错。
+        -->
         <aengine.version>1.0-RELEASE</aengine.version>
 
         <!-- 以下版本与 Aengine/pom.xml 对齐，统一最新稳定版 -->

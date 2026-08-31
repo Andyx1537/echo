@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  聚合工程。把引擎与业务工程放进同一个 reactor，让 echo-server 直接编译引擎源码。
+
+  🔴 为什么要有这个文件（2026-08-31 新增）
+
+  此前 echo-server 通过 `com.aengine:Aengine:1.0-RELEASE` 从本地 ~/.m2 解析引擎，
+  而那个 jar 停在 2026-06-26；引擎源码里已有 33 个生产文件比它新。
+  也就是说**跑着的引擎和仓库里的引擎源码不是一个东西**，且没有任何东西会报错。
+
+  这个失败形态对 M-6（把持久化统一到引擎）是致命的：在引擎源码里扩出来的能力，
+  echo-server 编译时看不见，照常构建通过，直到迁移时才发现根本没生效。
+
+  改成 reactor 之后，引擎源码即依赖，漂移在结构上不可能发生。
+
+  代价：构建根目录从 echo-server/ 上移到 echo/，`mvn` 命令要在这一层跑。
+  只想构建业务工程时用 `mvn -pl echo-server -am`。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.echo</groupId>
+    <artifactId>echo-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>echo-parent</name>
+    <description>回响 (Echo)：引擎 + 后端业务的聚合工程</description>
+
+    <modules>
+        <!-- 顺序无关，Maven 按依赖关系自行排；写成这个顺序只是为了读着顺 -->
+        <module>aengine</module>
+        <module>echo-server</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>26</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+</project>
