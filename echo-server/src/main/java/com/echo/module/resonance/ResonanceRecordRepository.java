@@ -1,7 +1,7 @@
 package com.echo.module.resonance;
 
 import com.aengine.persistence.annotation.CRepository;
-import com.echo.infra.persistence.CachedPgRepository;
+import com.aengine.persistence.db.CachedJDBCRepository;
 
 /**
  * {@link ResonanceRecord} 仓储（PostgreSQL + 内存缓存）。
@@ -10,5 +10,5 @@ import com.echo.infra.persistence.CachedPgRepository;
  */
 @Deprecated(since = "0.1.0", forRemoval = true)
 @CRepository(source = "echo")
-public class ResonanceRecordRepository extends CachedPgRepository<ResonanceRecord> {
+public class ResonanceRecordRepository extends CachedJDBCRepository<ResonanceRecord> {
 }

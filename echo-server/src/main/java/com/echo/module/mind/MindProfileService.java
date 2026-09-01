@@ -4,6 +4,7 @@ import com.aengine.util.GsonUtil;
 import com.aengine.util.id.IDGenerator;
 import com.echo.infra.llm.ILlmClient;
 import com.echo.infra.vector.IVectorStore;
+import com.echo.infra.embedding.EmbeddingDescriptor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Arrays;
@@ -60,7 +61,9 @@ public class MindProfileService {
         String enriched = safeEnrich(rawJson);
 
         float[] vector = vectorStore.encode(enriched);
+        IVectorStore.requireDimension(vector);
         String normHash = Integer.toHexString(Arrays.hashCode(vector));
+        EmbeddingDescriptor descriptor = vectorStore.descriptor();
 
         // 1) 先落/更新 SelfVector 元数据行（行的创建归仓储；embedding 列归向量通道）
         SelfVector selfVector = selfVectorRepository.get("accountId", accountId);
@@ -70,9 +73,13 @@ public class MindProfileService {
             selfVector.setId(idGenerator.nextId());
             selfVector.setAccountId(accountId);
         }
-        selfVector.setDim(IVectorStore.DIM);
+        selfVector.setDim(descriptor.dimensions());
         selfVector.setVectorRef("self:" + accountId);
         selfVector.setNormHash(normHash);
+        selfVector.setEmbedProvider(descriptor.provider());
+        selfVector.setEmbedModel(descriptor.model());
+        selfVector.setEmbedVersion(descriptor.version());
+        selfVector.setEmbeddedAt(System.currentTimeMillis());
         if (newVector) {
             selfVectorRepository.add(selfVector);
         } else {

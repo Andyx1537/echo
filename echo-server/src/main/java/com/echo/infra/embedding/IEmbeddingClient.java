@@ -26,4 +26,8 @@ public interface IEmbeddingClient {
     default int dimension() {
         return DEFAULT_DIM;
     }
+
+    default EmbeddingDescriptor descriptor() {
+        return new EmbeddingDescriptor("unknown", getClass().getSimpleName(), "default", dimension());
+    }
 }

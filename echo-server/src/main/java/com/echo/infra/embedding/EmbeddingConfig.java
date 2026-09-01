@@ -17,7 +17,8 @@ import java.util.function.Function;
  * <p>百炼 text-embedding-v3 提供 OpenAI 兼容的 {@code {baseUrl}/embeddings} 端点，且支持
  * {@code dimensions} 参数指定输出维度，故只需一套 {@link ApiEmbeddingClient} 即可。</p>
  */
-public record EmbeddingConfig(String provider, String baseUrl, String apiKey, String model, int dimensions) {
+public record EmbeddingConfig(String provider, String baseUrl, String apiKey, String model,
+                              String version, int dimensions) {
 
     /** 从进程环境变量装配。 */
     public static EmbeddingConfig fromEnv() {
@@ -43,8 +44,14 @@ public record EmbeddingConfig(String provider, String baseUrl, String apiKey, St
         if (model == null) {
             model = defaultModel(provider);
         }
+        String version = blankToNull(env.apply("ECHO_EMBED_VERSION"));
+        version = version == null ? "default" : version;
         int dimensions = parseDim(env.apply("ECHO_EMBED_DIM"));
-        return new EmbeddingConfig(provider, baseUrl, apiKey, model, dimensions);
+        if (dimensions != IEmbeddingClient.DEFAULT_DIM) {
+            throw new IllegalArgumentException("ECHO_EMBED_DIM=" + dimensions
+                    + " 与当前 pgvector 列 vector(" + IEmbeddingClient.DEFAULT_DIM + ") 不一致");
+        }
+        return new EmbeddingConfig(provider, baseUrl, apiKey, model, version, dimensions);
     }
 
     /**

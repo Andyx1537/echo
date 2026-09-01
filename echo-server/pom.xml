@@ -102,8 +102,8 @@
             <version>${protobuf.version}</version>
         </dependency>
 
-        <!-- 单库 PostgreSQL：JDBC 驱动 + HikariCP 连接池（com.echo.infra.persistence 自建 PG 方言持久化层）。
-             pgvector 向量列由 IVectorStore 通道处理（本期 mock），仅在 schema.sql 体现表结构。 -->
+        <!-- 单库 PostgreSQL：JDBC 驱动 + HikariCP。关系仓储复用 Aengine 方言持久化层；
+             pgvector 向量列由 IVectorStore 的 PgVectorStore 专用 SQL 通道处理。 -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
@@ -209,6 +209,10 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${surefire.version}</version>
+                <configuration>
+                    <!-- JDK 26 禁止 Mockito 依赖运行时自挂载，测试 JVM 显式加载 agent。 -->
+                    <argLine>-javaagent:${settings.localRepository}/net/bytebuddy/byte-buddy-agent/${bytebuddy.version}/byte-buddy-agent-${bytebuddy.version}.jar -Dnet.bytebuddy.experimental=true -Djava.awt.headless=true</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>

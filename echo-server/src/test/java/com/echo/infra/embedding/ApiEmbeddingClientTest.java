@@ -22,7 +22,7 @@ class ApiEmbeddingClientTest {
     private static final EmbeddingConfig CONFIG = EmbeddingConfig.from(k -> switch (k) {
         case "ECHO_EMBED_PROVIDER" -> "qwen";
         case "ECHO_EMBED_API_KEY" -> "sk-test";
-        case "ECHO_EMBED_DIM" -> "4";
+        case "ECHO_EMBED_DIM" -> "768";
         default -> null;
     });
 
@@ -43,19 +43,19 @@ class ApiEmbeddingClientTest {
 
     @Test
     void parsesEmbeddingFromNormalResponse() throws Exception {
-        String body = "{\"data\":[{\"embedding\":[0.1,0.2,0.3,0.4]}]}";
+        String body = "{\"data\":[{\"embedding\":[" + "0.25,".repeat(767) + "0.25]}]}";
         HttpClient http = httpReturning(resp(200, body));
         ApiEmbeddingClient client = new ApiEmbeddingClient(
-                CONFIG, new MockEmbeddingClient(4), http, Duration.ofSeconds(5));
+                CONFIG, new MockEmbeddingClient(768), http, Duration.ofSeconds(5));
 
         float[] v = client.embed("你好");
-        assertThat(v).containsExactly(0.1f, 0.2f, 0.3f, 0.4f);
+        assertThat(v).hasSize(768).containsOnly(0.25f);
     }
 
     @Test
     void non2xxDelegatesToFallback() throws Exception {
         HttpClient http = httpReturning(resp(429, "rate limited"));
-        MockEmbeddingClient fallback = new MockEmbeddingClient(4);
+        MockEmbeddingClient fallback = new MockEmbeddingClient(768);
         ApiEmbeddingClient client = new ApiEmbeddingClient(CONFIG, fallback, http, Duration.ofSeconds(5));
 
         float[] v = client.embed("hi");
@@ -68,7 +68,7 @@ class ApiEmbeddingClientTest {
         HttpClient http = mock(HttpClient.class);
         when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
                 .thenThrow(new IOException("network down"));
-        MockEmbeddingClient fallback = new MockEmbeddingClient(4);
+        MockEmbeddingClient fallback = new MockEmbeddingClient(768);
         ApiEmbeddingClient client = new ApiEmbeddingClient(CONFIG, fallback, http, Duration.ofSeconds(5));
 
         float[] v = client.embed("hi");
@@ -78,7 +78,7 @@ class ApiEmbeddingClientTest {
     @Test
     void malformedResultDelegatesToFallback() throws Exception {
         HttpClient http = httpReturning(resp(200, "{\"data\":[]}"));
-        MockEmbeddingClient fallback = new MockEmbeddingClient(4);
+        MockEmbeddingClient fallback = new MockEmbeddingClient(768);
         ApiEmbeddingClient client = new ApiEmbeddingClient(CONFIG, fallback, http, Duration.ofSeconds(5));
 
         float[] v = client.embed("hi");
@@ -87,7 +87,7 @@ class ApiEmbeddingClientTest {
 
     @Test
     void dimensionReflectsConfig() {
-        ApiEmbeddingClient client = new ApiEmbeddingClient(CONFIG, new MockEmbeddingClient(4));
-        assertThat(client.dimension()).isEqualTo(4);
+        ApiEmbeddingClient client = new ApiEmbeddingClient(CONFIG, new MockEmbeddingClient(768));
+        assertThat(client.dimension()).isEqualTo(768);
     }
 }

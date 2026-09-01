@@ -2,6 +2,7 @@ package com.echo.infra.vector;
 
 import com.echo.infra.embedding.IEmbeddingClient;
 import com.echo.infra.embedding.MockEmbeddingClient;
+import com.echo.infra.embedding.EmbeddingDescriptor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -37,11 +38,19 @@ public class InMemoryVectorStore implements IVectorStore {
 
     @Override
     public float[] encode(String enrichedPrefs) {
-        return embeddingClient.embed(enrichedPrefs);
+        float[] vector = embeddingClient.embed(enrichedPrefs);
+        IVectorStore.requireDimension(vector);
+        return vector;
+    }
+
+    @Override
+    public EmbeddingDescriptor descriptor() {
+        return embeddingClient.descriptor();
     }
 
     @Override
     public void upsert(long accountId, float[] vector) {
+        IVectorStore.requireDimension(vector);
         store.put(accountId, vector);
         log.debug("InMemoryVectorStore.upsert accountId={}, size={}", accountId, store.size());
     }
@@ -53,6 +62,7 @@ public class InMemoryVectorStore implements IVectorStore {
 
     @Override
     public List<ScoredId> topN(float[] query, int k, double threshold) {
+        IVectorStore.requireDimension(query);
         List<ScoredId> result = new ArrayList<>();
         store.entrySet().stream()
                 .map(e -> new ScoredId(e.getKey(), cosineDistance(query, e.getValue())))

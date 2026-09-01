@@ -1,0 +1,33 @@
+package com.echo.bootstrap;
+
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SchemaContractTest {
+
+    @Test
+    void requiredVersionIsRecordedInSchemaSource() throws Exception {
+        try (var in = SchemaContractTest.class.getResourceAsStream("/sql/schema.sql")) {
+            assertThat(in).as("schema.sql must be on the runtime classpath").isNotNull();
+            String sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_schema_version\"");
+            assertThat(sql).contains("(" + EchoDatabase.REQUIRED_SCHEMA_VERSION + ",");
+            assertThat(sql).contains("USING hnsw (\"embedding\" vector_cosine_ops)");
+        }
+    }
+
+    @Test
+    void productionLikeDbConfigUsesValidateMode() throws Exception {
+        var path = java.nio.file.Path.of("../deploy/echo-db.properties").normalize();
+        assertThat(path).exists();
+        var properties = new java.util.Properties();
+        try (var in = java.nio.file.Files.newInputStream(path)) {
+            properties.load(in);
+        }
+        assertThat(properties.getProperty("db.dialect")).isEqualTo("postgresql");
+        assertThat(properties.getProperty("db.schemaMode")).isEqualTo("validate");
+    }
+}

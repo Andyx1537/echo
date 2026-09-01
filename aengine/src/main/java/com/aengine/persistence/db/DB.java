@@ -1,5 +1,8 @@
 package com.aengine.persistence.db;
 
+import com.aengine.persistence.dialect.Dialect;
+import com.aengine.persistence.dialect.MySqlDialect;
+import com.aengine.persistence.dialect.PostgresDialect;
 import com.aengine.util.thread.NamedThreadFactory;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -36,6 +39,11 @@ public class DB {
      */
     private final String name;
 
+    /** 当前数据源使用的 SQL 方言；历史配置缺省为 MySQL。 */
+    private final Dialect dialect;
+
+    private final SchemaMode schemaMode;
+
     /*
 	 * 持久化的线程池
      */
@@ -46,8 +54,10 @@ public class DB {
      *
      * @param properties 配置文件
      */
-    public DB(Properties properties) throws Exception {
+    public DB(Properties properties) {
         this.name = properties.getProperty("db.name");
+        this.dialect = createDialect(properties.getProperty("db.dialect", "mysql"));
+        this.schemaMode = SchemaMode.parse(properties.getProperty("db.schemaMode"));
         this.dataSource = createDataSource(properties);
         if (properties.containsKey("db.slowLog")) {
             this.slowLog = Integer.parseInt(properties.getProperty("db.slowLog"));
@@ -67,9 +77,20 @@ public class DB {
     }
     
     public DB(String name, DataSource dataSource, int threads, int slowLog) {
+		this(name, dataSource, threads, slowLog, new MySqlDialect());
+	}
+
+    public DB(String name, DataSource dataSource, int threads, int slowLog, Dialect dialect) {
+		this(name, dataSource, threads, slowLog, dialect, SchemaMode.UPDATE);
+	}
+
+    public DB(String name, DataSource dataSource, int threads, int slowLog,
+              Dialect dialect, SchemaMode schemaMode) {
     	this.name = name;
         this.dataSource = dataSource;
         this.slowLog = slowLog;
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
+        this.schemaMode = Objects.requireNonNull(schemaMode, "schemaMode");
         NamedThreadFactory namedThreadFactory = new NamedThreadFactory("db-saver");
         if (threads > 0) {
             pools = new ScheduledThreadPoolExecutor[threads];
@@ -77,6 +98,14 @@ public class DB {
                 pools[i] = new ScheduledThreadPoolExecutor(1, namedThreadFactory);
             }
         }
+    }
+
+    private static Dialect createDialect(String name) {
+        return switch (name == null ? "mysql" : name.trim().toLowerCase(Locale.ROOT)) {
+            case "postgres", "postgresql", "pg" -> new PostgresDialect();
+            case "mysql" -> new MySqlDialect();
+            default -> throw new IllegalArgumentException("unsupported db.dialect: " + name);
+        };
     }
 
     /**
@@ -135,6 +164,52 @@ public class DB {
 
     public String getName() {
         return name;
+    }
+
+    public Dialect getDialect() {
+        return dialect;
+    }
+
+    public SchemaMode getSchemaMode() {
+        return schemaMode;
+    }
+
+    @FunctionalInterface
+    public interface TransactionWork<T> {
+        T run(Connection connection) throws SQLException;
+    }
+
+    /** 在同一连接中执行工作；成功提交，异常回滚。 */
+    public <T> T inTransaction(TransactionWork<T> work) throws SQLException {
+        long startedAt = System.currentTimeMillis();
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                T result = work.run(connection);
+                connection.commit();
+                return result;
+            } catch (SQLException | RuntimeException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                    log.error("transaction rollback failed", rollbackFailure);
+                }
+                throw e;
+            } finally {
+                try {
+                    connection.setAutoCommit(previousAutoCommit);
+                } catch (SQLException restoreFailure) {
+                    log.warn("restore autoCommit failed", restoreFailure);
+                }
+            }
+        } finally {
+            long cost = System.currentTimeMillis() - startedAt;
+            if (cost > slowLog && log.isWarnEnabled()) {
+                log.warn("slow transaction [" + cost + "ms]");
+            }
+        }
     }
 
     public int getSlowLog() {
@@ -418,24 +493,28 @@ public class DB {
     }
 
     public void shutdown() {
-        if (pools == null) {
-            return;
-        }
-        for (ScheduledThreadPoolExecutor pool : pools) {
-            try {
-                pool.shutdown();
-                while (!pool.isTerminated()) {
-                    if (log.isWarnEnabled()) {
-                        log.warn(pool.getQueue().size() + " task(s) in save queue.");
+        if (pools != null) {
+            for (ScheduledThreadPoolExecutor pool : pools) {
+                try {
+                    pool.shutdown();
+                    while (!pool.isTerminated()) {
+                        if (log.isWarnEnabled()) {
+                            log.warn(pool.getQueue().size() + " task(s) in save queue.");
+                        }
+                        try {
+                            pool.awaitTermination(1, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
                     }
-                    try {
-                        pool.awaitTermination(1, TimeUnit.SECONDS);
-                    } catch (InterruptedException e) {
-                    }
+                } catch (Throwable t) {
+                    log.error("shutdown save pool failed", t);
                 }
-            } catch (Throwable t) {
-                log.error("", t);
             }
+        }
+        if (dataSource instanceof HikariDataSource hikari) {
+            hikari.close();
         }
     }
 }

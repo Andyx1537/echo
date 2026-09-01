@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link EmbeddingConfig} 配置解析与回退判定、{@link EmbeddingClientFactory} 装配单测
@@ -47,15 +48,22 @@ class EmbeddingConfigTest {
     }
 
     @Test
-    void customDimAndBaseUrlParsed() {
+    void customBaseUrlParsedButUnsupportedDimensionFailsFast() {
         Map<String, String> env = new HashMap<>();
         env.put("ECHO_EMBED_PROVIDER", "qwen");
         env.put("ECHO_EMBED_API_KEY", "sk-test");
         env.put("ECHO_EMBED_BASE_URL", "https://example.com/v1/");
         env.put("ECHO_EMBED_DIM", "1024");
-        EmbeddingConfig cfg = of(env);
-        assertThat(cfg.baseUrl()).isEqualTo("https://example.com/v1");
-        assertThat(cfg.dimensions()).isEqualTo(1024);
+        assertThatThrownBy(() -> of(env))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("vector(768)");
+    }
+
+    @Test
+    void modelVersionIsExplicitlyConfigurable() {
+        Map<String, String> env = new HashMap<>();
+        env.put("ECHO_EMBED_VERSION", "2026-08-31");
+        assertThat(of(env).version()).isEqualTo("2026-08-31");
     }
 
     @Test

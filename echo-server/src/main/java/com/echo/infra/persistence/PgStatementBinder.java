@@ -10,6 +10,7 @@ import java.sql.SQLException;
  * 以避免依赖 Aengine 的 MySQL 持久化包。</p>
  */
 @FunctionalInterface
-public interface PgStatementBinder {
+public interface PgStatementBinder extends com.aengine.persistence.db.PreparedStatementBinder {
+    @Override
     void bind(PreparedStatement ps) throws SQLException;
 }

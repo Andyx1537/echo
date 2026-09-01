@@ -59,11 +59,20 @@ public class ApiEmbeddingClient implements IEmbeddingClient {
     }
 
     @Override
+    public EmbeddingDescriptor descriptor() {
+        return new EmbeddingDescriptor(config.provider(), config.model(), config.version(), config.dimensions());
+    }
+
+    @Override
     public float[] embed(String text) {
         float[] v = call(text);
         if (v == null || v.length == 0) {
             log.warn("ApiEmbeddingClient 无有效向量，走 fallback, provider={}", config.provider());
-            return fallback.embed(text);
+            v = fallback.embed(text);
+        }
+        if (v.length != dimension()) {
+            throw new IllegalStateException("embedding dimension mismatch: expected=" + dimension()
+                    + ", actual=" + v.length);
         }
         return v;
     }

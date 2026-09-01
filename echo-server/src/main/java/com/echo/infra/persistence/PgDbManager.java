@@ -2,22 +2,19 @@ package com.echo.infra.persistence;
 
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import com.aengine.persistence.db.DB;
+import com.aengine.persistence.db.DBManager;
 
 /**
  * PostgreSQL 数据源注册表（镜像 Aengine {@code DBManager} 中按名取库的用法）。
  *
- * <p>{@link PgRepository} 构造时通过 {@code @CRepository.source()} 从这里取 {@link PgDb}。
- * 缺省为空，未注册任何数据源时取库返回 null —— 这就是"不连库"的默认态：
- * 只要不实例化仓储，进程即可在无库环境编译/启动。</p>
+ * <p>兼容旧 HTTP Store 的门面，底层唯一注册表已经是 Aengine {@link DBManager}。
+ * 新 Repository 直接按 {@code @CRepository.source()} 从 Aengine 取库。</p>
  */
 @Slf4j
 public final class PgDbManager {
 
     private static final PgDbManager INSTANCE = new PgDbManager();
-
-    private final Map<String, PgDb> databases = new ConcurrentHashMap<>();
 
     private PgDbManager() {
     }
@@ -27,22 +24,30 @@ public final class PgDbManager {
     }
 
     public void add(PgDb db) {
-        PgDb old = databases.putIfAbsent(db.getName(), db);
-        if (old != null && old != db) {
+        DB old = DBManager.getInstance().get(db.getName());
+        if (old == null) {
+            DBManager.getInstance().add(db);
+        } else if (old != db) {
             log.warn("PG 数据源已存在: {}", db.getName());
         }
     }
 
     public PgDb get(String name) {
-        return databases.get(name);
+        DB db = DBManager.getInstance().get(name);
+        if (db == null) {
+            return null;
+        }
+        if (!(db instanceof PgDb pgDb)) {
+            throw new IllegalStateException("数据源不是 Echo PostgreSQL 兼容类型: " + name);
+        }
+        return pgDb;
     }
 
     public void remove(String name) {
-        databases.remove(name);
+        DBManager.getInstance().remove(name);
     }
 
     public void shutdown() {
-        databases.values().forEach(PgDb::shutdown);
-        databases.clear();
+        DBManager.getInstance().shutdown();
     }
 }

@@ -41,4 +41,9 @@ public class MockEmbeddingClient implements IEmbeddingClient {
     public int dimension() {
         return dim;
     }
+
+    @Override
+    public EmbeddingDescriptor descriptor() {
+        return new EmbeddingDescriptor("mock", "deterministic-char-hash", "v1", dim);
+    }
 }

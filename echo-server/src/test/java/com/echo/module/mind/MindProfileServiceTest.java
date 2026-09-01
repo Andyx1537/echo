@@ -1,6 +1,7 @@
 package com.echo.module.mind;
 
 import com.aengine.util.id.IDGenerator;
+import com.echo.infra.embedding.EmbeddingDescriptor;
 import com.echo.infra.llm.ILlmClient;
 import com.echo.infra.vector.IVectorStore;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -42,6 +44,8 @@ class MindProfileServiceTest {
 
     @BeforeEach
     void setUp() {
+        lenient().when(vectorStore.descriptor()).thenReturn(
+                new EmbeddingDescriptor("mock", "deterministic-char-hash", "v1", IVectorStore.DIM));
         service = new MindProfileService(
                 mindProfileRepository, selfVectorRepository, llmClient, vectorStore, new IDGenerator(1));
     }

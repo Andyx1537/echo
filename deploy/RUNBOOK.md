@@ -28,6 +28,15 @@
   - `driverClassName=org.postgresql.Driver`
   - `username=echo` / `password=echo`
   - `maximumPoolSize=8`
+  - `db.dialect=postgresql`
+  - `db.schemaMode=validate` —— 服务启动只校验 Repository 所需表/列，不自动修改数据库。
+
+数据库结构以 `schema.sql` 为唯一真源，并在 `t_schema_version` 记录版本。当前服务要求
+`2026083102`；版本缺失、落后或超前都会拒绝启动，不能降级成内存态继续提供服务。
+
+向量模型配置除 provider/model/dim 外增加 `ECHO_EMBED_VERSION`。当前列固定为 `vector(768)`，
+`ECHO_EMBED_DIM` 不是 768 时服务会在装配阶段拒绝启动。切换 provider/model/version 后，旧向量不会
+参与新模型检索，需通过 `VectorRebuildService` 分批回填。
 
 公共环境变量（每个新开终端都先执行）：
 
@@ -57,6 +66,7 @@ docker compose exec -T db psql -U echo -d echo < $ECHO/echo-server/src/main/reso
 # 3) 校验
 docker compose exec db psql -U echo -d echo -c "\dt"
 docker compose exec db psql -U echo -d echo -c "SELECT extname,extversion FROM pg_extension WHERE extname='vector';"
+docker compose exec db psql -U echo -d echo -c 'SELECT MAX("version") FROM "t_schema_version";'
 ```
 
 然后跳到 **第 3 步：构建并启动 EchoServer**。停库：`docker compose down`（删数据加 `-v`）。
@@ -106,10 +116,12 @@ export PGDATA=$DEPLOY/pgdata
 "$PGBIN/psql" -h 127.0.0.1 -p 5432 -U echo -d echo -v ON_ERROR_STOP=1 \
   -f $ECHO/echo-server/src/main/resources/sql/schema.sql
 
-# 校验：9 张表 / vector 扩展 / embedding 维度
+# 校验：业务表 / vector 扩展 / schema 版本
 "$PGBIN/psql" -h 127.0.0.1 -p 5432 -U echo -d echo -c "\dt"
 "$PGBIN/psql" -h 127.0.0.1 -p 5432 -U echo -d echo -c \
   "SELECT extname,extversion FROM pg_extension WHERE extname='vector';"
+"$PGBIN/psql" -h 127.0.0.1 -p 5432 -U echo -d echo -c \
+  'SELECT MAX("version") FROM "t_schema_version";'
 ```
 
 ---
@@ -144,7 +156,8 @@ PostgreSQL 数据源已注册: name=echo
 EchoServer WebSocket 已启动: ws://0.0.0.0:9001
 ```
 
-> schema 已就绪时，`PgRepository` 通过 `information_schema` 探测到表已存在，不会重复建表。
+> 标准配置为 `db.schemaMode=validate`。schema 已就绪时，Aengine Repository 只校验表和列，
+> 不会在服务启动过程中修改数据库。
 
 **长跑**：上面的命令在前台运行。要后台长跑，用：
 
@@ -216,7 +229,7 @@ rm -rf $DEPLOY/pgdata
 
 5. **连库失败 / 启动后无业务 Handler**
    - 看日志是否有 `PostgreSQL 数据源已注册: name=echo`；没有则检查 `-Decho.db.enabled=true` 与 `-Decho.db.config` 路径。
-   - `PgDb` 惰性连接（`initializationFailTimeout=-1`），库没起来也能启动到 WebSocket，但登录会失败——确认库在 5432 且 schema 已建。
+   - `PgDb` 连接池仍是惰性创建，但启动阶段会强制查询 `t_schema_version`；库不可用或版本不一致时进程直接失败。
    - 日志出现「未接入 DB，仅注册心跳 Handler」说明 DB 没开成功，按上面两点排查。
 
 6. **`mvn install` 阶段报 `Operation not permitted`**

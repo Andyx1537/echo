@@ -2,7 +2,7 @@
 -- 回响 (Echo) · P1 建表脚本 (PostgreSQL 方言，架构 B'：单库 PG + pgvector)
 --
 -- 与 com.echo.module.* 下的 Aengine 实体注解保持一致（TECH-P1 §2）。
--- com.echo.infra.persistence.PgRepository 在开启 DB 时会按注解自动建表/补字段，本脚本用于：
+-- Aengine JDBCRepository 在开启 DB 时会按注解和 PostgreSQL 方言自动建表/补字段，本脚本用于：
 --   1) 离线初始化 / DBA 评审；
 --   2) 体现 pgvector 向量列结构（向量列由 IVectorStore 通道管理，不归通用 CRUD）。
 --
@@ -11,9 +11,16 @@
 --   - 主键为雪花 ID（bigint，应用层 IDGenerator 赋值，非自增）。
 --   - json 字段以 text 文本存储。
 --   - 被 @Cache 的列（openId / accountId / ownerSpaceId）业务上只读、不更新。
---   - 索引名带表前缀，与 PgRepository 自动建索引命名一致（避免同 schema 同名冲突）。
+--   - 索引名带表前缀，与 Aengine Repository 自动建索引命名一致（避免同 schema 同名冲突）。
 -- =============================================================================
 
+-- Schema 版本由部署流程写入；应用启动读取 MAX(version) 并与代码期望值严格比较。
+-- 新迁移只能追加更大的版本号，不得修改已经部署过的历史版本。
+CREATE TABLE IF NOT EXISTS "t_schema_version" (
+    "version"   bigint NOT NULL,
+    "appliedAt" bigint NOT NULL,
+    PRIMARY KEY ("version")
+);
 -- pgvector 扩展（向量相似度检索所需）
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -51,8 +58,8 @@ CREATE TABLE IF NOT EXISTS "t_mind_profile" (
 CREATE INDEX IF NOT EXISTS "t_mind_profile_idx_account_id" ON "t_mind_profile" ("accountId");
 
 -- --------------------------- 个人向量元数据 ----------------------------------
--- 关系型元数据由 PgRepository 管理；"embedding" 向量本体由 IVectorStore 通道写入，
--- 不归通用 CRUD（PgRepository 不读写该列）。维度先用常量 768。
+-- 关系型元数据由 Aengine Repository 管理；"embedding" 向量本体由 IVectorStore 通道写入，
+-- 不归通用 CRUD（Repository 不读写该列）。维度先用常量 768。
 -- TODO: 维度可配置（不同 LLM/编码器输出维度不同）。
 CREATE TABLE IF NOT EXISTS "t_self_vector" (
     "id"        bigint       NOT NULL,
@@ -60,13 +67,23 @@ CREATE TABLE IF NOT EXISTS "t_self_vector" (
     "dim"       integer      NOT NULL DEFAULT 0,
     "vectorRef" varchar(128) NOT NULL DEFAULT '',
     "normHash"  varchar(64)  NOT NULL DEFAULT '',
+    "embedProvider" varchar(32)  NOT NULL DEFAULT 'unknown',
+    "embedModel"    varchar(128) NOT NULL DEFAULT 'unknown',
+    "embedVersion"  varchar(64)  NOT NULL DEFAULT 'default',
+    "embeddedAt"    bigint       NOT NULL DEFAULT 0,
     "embedding" vector(768),
     PRIMARY KEY ("id")
 );
 CREATE INDEX IF NOT EXISTS "t_self_vector_idx_account_id" ON "t_self_vector" ("accountId");
--- 向量近邻索引（余弦距离），由向量通道按需启用：
--- CREATE INDEX IF NOT EXISTS "t_self_vector_embedding_ivf" ON "t_self_vector"
---     USING ivfflat ("embedding" vector_cosine_ops) WITH (lists = 100);
+ALTER TABLE "t_self_vector" ADD COLUMN IF NOT EXISTS "embedProvider" varchar(32) NOT NULL DEFAULT 'unknown';
+ALTER TABLE "t_self_vector" ADD COLUMN IF NOT EXISTS "embedModel" varchar(128) NOT NULL DEFAULT 'unknown';
+ALTER TABLE "t_self_vector" ADD COLUMN IF NOT EXISTS "embedVersion" varchar(64) NOT NULL DEFAULT 'default';
+ALTER TABLE "t_self_vector" ADD COLUMN IF NOT EXISTS "embeddedAt" bigint NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS "t_self_vector_idx_model_version"
+    ON "t_self_vector" ("embedProvider", "embedModel", "embedVersion");
+-- HNSW 无需训练即可增量维护，适合当前持续写入；查询仍按模型身份过滤，禁止跨模型比较。
+CREATE INDEX IF NOT EXISTS "t_self_vector_embedding_hnsw" ON "t_self_vector"
+    USING hnsw ("embedding" vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 
 -- --------------------------- 意识空间实例 ------------------------------------
 CREATE TABLE IF NOT EXISTS "t_mind_space" (
@@ -369,10 +386,10 @@ CREATE INDEX IF NOT EXISTS "t_train_sample_idx_consent" ON "t_train_sample" ("co
 --   - 软删三列统一为 deletedAt bigint / deletedBy bigint / deleteReason varchar(64)（G0-1）。
 --   - json 列用 jsonb：本段各规格字段表（§1.5 topicIds/interaction、§2.6 autoSignals/snapshot、
 --     §15.4 scope、§1.8.2 beforeRow/afterRow）写的都是 jsonb，且 §1.8.2 触发器依赖 to_jsonb()。
---     本文件上半部分「json 以 text 存」的约定源自 PgRepository 的注解序列化，本段各表不由
---     PgRepository 管理（手写 SQL 访问），故不适用。
+--     本文件上半部分「json 以 text 存」的约定源自 Repository 的注解序列化，本段各表不由
+--     Repository 管理（手写 SQL 访问），故不适用。
 --
--- 🔴 PgRepository 按实体注解自动建表/补字段，不会生成 CHECK 约束、外键与触发器（§1.8.1 实现注意）。
+-- 🔴 Aengine Repository 按实体注解自动建表/补字段，不会生成 CHECK 约束、外键与触发器（§1.8.1 实现注意）。
 --    本段的护栏必须由本脚本显式建立并纳入 DEPLOY 检查项，否则线上是一批没有任何护栏的裸表。
 --
 -- ⚠️ 建表顺序按依赖排（§1.8 已警告"按重要性排版会照抄失败"）：
@@ -1315,3 +1332,9 @@ CREATE INDEX IF NOT EXISTS "t_resource_idx_owner"
 -- 反查：从存储键找回归属，下架与审计都要走这条。
 CREATE INDEX IF NOT EXISTS "t_resource_idx_key"
     ON "t_resource" ("storageKey");
+
+-- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
+INSERT INTO "t_schema_version" ("version", "appliedAt")
+VALUES (2026083101, 1788177600000),
+       (2026083102, 1788181200000)
+ON CONFLICT ("version") DO NOTHING;

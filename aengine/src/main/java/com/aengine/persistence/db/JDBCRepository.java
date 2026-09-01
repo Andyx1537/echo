@@ -3,6 +3,9 @@ package com.aengine.persistence.db;
 import com.aengine.persistence.*;
 import com.aengine.persistence.annotation.CRepository;
 import com.aengine.persistence.annotation.Table;
+import com.aengine.persistence.dialect.Dialect;
+import com.aengine.persistence.dialect.IndexSpec;
+import com.aengine.persistence.dialect.PostgresDialect;
 import com.aengine.util.GsonUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +27,8 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
     protected final DB db;
 
     protected final TableMeta meta;
+
+    protected final Dialect dialect;
 
     private int slowLog;
 
@@ -53,15 +58,45 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
     protected JDBCRepository() {
         CRepository repository = getAnnotation();
         this.db = DBManager.getInstance().get(repository.source());
+        if (this.db == null) {
+            throw new IllegalStateException("database not registered: " + repository.source());
+        }
+        this.dialect = db.getDialect();
         this.meta = TableMeta.parse(getClassOfEntity(), true);
         this.slowLog = db.getSlowLog();
         this.pool = db.getPool();
         if (meta.isAutoCreate()) {
             try {
-                fixTable();
+                switch (db.getSchemaMode()) {
+                    case NONE -> { }
+                    case VALIDATE -> validateTable();
+                    case UPDATE -> fixTable();
+                }
             } catch (Exception e) {
-                log.error("fix table failed", e);
+                throw new IllegalStateException("schema " + db.getSchemaMode().name().toLowerCase()
+                        + " failed for " + meta.getName(), e);
             }
+        }
+    }
+
+    private void validateTable() throws SQLException {
+        boolean tableExists = !db.query(dialect.tableExistsSql(),
+                ps -> ps.setString(1, meta.getName())).isEmpty();
+        if (!tableExists) {
+            throw new SQLException("required table is missing: " + meta.getName());
+        }
+        List<String> missing = new ArrayList<>();
+        for (ColumnMeta column : meta.getColumns()) {
+            boolean exists = !db.query(dialect.columnExistsSql(), ps -> {
+                ps.setString(1, meta.getName());
+                ps.setString(2, column.getName());
+            }).isEmpty();
+            if (!exists) {
+                missing.add(column.getName());
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw new SQLException("required columns are missing from " + meta.getName() + ": " + missing);
         }
     }
 
@@ -124,6 +159,10 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
         if (!annotation.autoCreate()) {
             return;
         }
+        if (dialect instanceof PostgresDialect) {
+            fixPostgresTable();
+            return;
+        }
         List<Map<String, Object>> list = db.query("SHOW TABLES LIKE \"" + meta.getName() + "%\"");
         Set<String> tables = new HashSet<>();
         for (Map<String, Object> map : list) {
@@ -162,7 +201,54 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
         }
     }
 
+    /** PostgreSQL 只做幂等创建与补缺失列，不在启动期破坏性修改已有列或删除索引。 */
+    private void fixPostgresTable() throws Exception {
+        if (meta.getCluster() > 0) {
+            throw new UnsupportedOperationException("PostgreSQL clustered tables are not supported yet: " + meta.getName());
+        }
+        boolean exists = !db.query(dialect.tableExistsSql(), ps -> ps.setString(1, meta.getName())).isEmpty();
+        if (!exists) {
+            db.update(buildCreateSQL(meta.getName()));
+        } else {
+            for (ColumnMeta column : meta.getColumns()) {
+                boolean columnExists = !db.query(dialect.columnExistsSql(), ps -> {
+                    ps.setString(1, meta.getName());
+                    ps.setString(2, column.getName());
+                }).isEmpty();
+                if (!columnExists) {
+                    db.update(dialect.addColumn(meta.getName(), buildColumnDdl(column)));
+                }
+            }
+        }
+        for (IndexMeta index : meta.getIndexes().values()) {
+            IndexSpec spec = new IndexSpec(index.getName(), index.getType());
+            for (String column : index.getColumns()) {
+                spec.column(column);
+            }
+            db.update(dialect.createIndex(meta.getName(), spec));
+        }
+    }
+
+    private String buildColumnDdl(ColumnMeta column) {
+        StringBuilder ddl = new StringBuilder(dialect.quote(column.getName())).append(' ')
+                .append(dialect.columnType(column.getType(), column.getLength(), null));
+        if (column.isNotNull()) {
+            ddl.append(" NOT NULL");
+            if (!column.isPk()) {
+                String defaultValue = dialect.defaultLiteral(column.getType());
+                if (defaultValue != null) {
+                    ddl.append(" DEFAULT ").append(defaultValue);
+                }
+            }
+        }
+        return ddl.toString();
+    }
+
     protected String buildCreateSQL(String tableName) {
+        if (dialect instanceof PostgresDialect) {
+            List<String> columns = meta.getColumns().stream().map(this::buildColumnDdl).toList();
+            return dialect.createTable(tableName, columns, List.of(meta.getPk().getName()), List.of());
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE TABLE IF NOT EXISTS `").append(tableName).append("`(\n");
         // columns
@@ -196,20 +282,18 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
 
     private String buildInsertSQL(T entity) {
         StringBuilder sb = new StringBuilder();
-        sb.append("INSERT INTO `");
-        sb.append(meta.getRealName(entity));
-        sb.append("` (");
+        sb.append("INSERT INTO ").append(dialect.quote(meta.getRealName(entity))).append(" (");
         StringBuilder vTemp = new StringBuilder();
         StringBuilder cTemp = new StringBuilder();
         for (int i = 0; i < meta.getColumns().size(); i++) {
             ColumnMeta col = meta.getColumns().get(i);
             if (!col.isPk() || !col.isAuto()) {
-                cTemp.append("`").append(col.getName()).append("`, ");
+                cTemp.append(dialect.quote(col.getName())).append(", ");
                 vTemp.append("?, ");
             }
         }
         sb.append(cTemp.subSequence(0, cTemp.length() - 2));
-        sb.append(") VALUE (").append(vTemp.subSequence(0, vTemp.length() - 2)).append(")");
+        sb.append(") VALUES (").append(vTemp.subSequence(0, vTemp.length() - 2)).append(")");
         return sb.toString();
     }
 
@@ -320,23 +404,24 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
     }
 
     private String buildDeleteSQL(TableMeta meta, T entity) {
-        return "DELETE FROM `" + meta.getRealName(entity) + "` WHERE `" + meta.getPk().getName() + "` = ?";
+        return "DELETE FROM " + dialect.quote(meta.getRealName(entity)) + " WHERE "
+                + dialect.quote(meta.getPk().getName()) + " = ?";
     }
 
     private String buildUpdateSQL(T entity) {
         StringBuilder sb = new StringBuilder();
-        sb.append("UPDATE `").append(meta.getRealName(entity)).append("` SET ");
+        sb.append("UPDATE ").append(dialect.quote(meta.getRealName(entity))).append(" SET ");
         for (int i = 0; i < meta.getColumns().size(); i++) {
             ColumnMeta col = meta.getColumns().get(i);
             if (!col.isReadOnly() && !col.isPk()) {
-                sb.append("`").append(col.getName()).append("` = ?").append(",");
+                sb.append(dialect.quote(col.getName())).append(" = ?").append(",");
             }
         }
         String withToken = sb.toString();
         String removeLast = withToken.substring(0, withToken.length() - 1);
         sb = new StringBuilder();
         sb.append(removeLast);
-        sb.append(" WHERE `").append(meta.getPk().getName()).append("` = ?");
+        sb.append(" WHERE ").append(dialect.quote(meta.getPk().getName())).append(" = ?");
         return sb.toString();
     }
 
@@ -359,14 +444,13 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
         sb.append("SELECT ");
         for (int i = 0; i < meta.getColumns().size(); i++) {
             ColumnMeta col = meta.getColumns().get(i);
-            sb.append("`").append(col.getName()).append("`");
+            sb.append(dialect.quote(col.getName()));
             if (i < meta.getColumns().size() - 1) {
                 sb.append(",");
             }
         }
-        sb.append(" FROM `").append(meta.getName())
-                .append("` WHERE `").append(meta.getPk().getName())
-                .append("` = ?");
+        sb.append(" FROM ").append(dialect.quote(meta.getName()))
+                .append(" WHERE ").append(dialect.quote(meta.getPk().getName())).append(" = ?");
         return sb.toString();
     }
 
@@ -420,7 +504,7 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
             String colName = it.next();
             Object value = options.get(colName);
             ColumnMeta col = meta.getColumnMetaByFieldName(colName);
-            sb.append("`").append(col.getName()).append("` = ?");
+            sb.append(dialect.quote(col.getName())).append(" = ?");
             outCols.add(col);
             outValues.add(value);
             if (it.hasNext()) {
@@ -435,22 +519,20 @@ public abstract class JDBCRepository<T extends AbstractEntity> implements IRepos
         sb.append("SELECT ");
         for (int i = 0; i < meta.getColumns().size(); i++) {
             ColumnMeta col = meta.getColumns().get(i);
-            sb.append("`").append(col.getName()).append("`");
+            sb.append(dialect.quote(col.getName()));
             if (i < meta.getColumns().size() - 1) {
                 sb.append(",");
             }
         }
         if (meta.getClusterBy() == null) {
-            sb.append(" FROM `").append(meta.getName()).append("` ");
+            sb.append(" FROM ").append(dialect.quote(meta.getName())).append(" ");
         } else {
             Object cluster = option.get(meta.getClusterBy().getField().getName());
             if (cluster == null) {
                 throw new RuntimeException("cluster needed when query table");
             }
-            sb.append(" FROM `")
-                    .append(meta.getName())
-                    .append("_").append(Math.abs(cluster.hashCode() % meta.getCluster()))
-                    .append("`");
+            sb.append(" FROM ").append(dialect.quote(meta.getName() + "_"
+                    + Math.abs(cluster.hashCode() % meta.getCluster())));
         }
         if (option != null) {
             sb.append(buildWhereSQL(option, outCols, outValues));

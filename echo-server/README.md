@@ -1,9 +1,10 @@
 # echo-server
 
 回响 (Echo) 后端业务工程 —— **BE-1 ~ BE-5**。本工程是一个独立的 Maven 项目，把
-[Aengine](../../Aengine) 游戏引擎当作**被依赖的库（引擎支援）**使用，复用其
+[Aengine](../aengine) 游戏引擎模块作为**底层引擎支援**，复用其
 network(Netty/WebSocket)、persistence、event、scheduler、template、cache、util 能力。
-**不修改 Aengine 源码**，仅依赖其已发布的构件。
+根目录 Maven reactor 同时构建 Aengine 与 echo-server，业务仓储统一基于引擎的
+`CachedJDBCRepository`，避免源码与本地已发布构件漂移。
 
 - 坐标：`com.echo:echo-server:0.1.0-SNAPSHOT`，packaging=jar
 - JDK 26，UTF-8
@@ -16,11 +17,11 @@ com.echo
 ├── bootstrap   启动类（EchoServer）、DB 初始化（EchoDatabase）、过期回声清理任务（EchoExpiryJob）
 ├── gateway     WebSocket 接入/会话 + 协议 Handler（Login/MindProfile/Space/Resonance/Echo/Heartbeat）
 ├── module      业务模块：mind / space / resonance / echo / social / account / avatar
-│               （各含 实体 + CachedPgRepository 仓储 + Service 领域逻辑）
+│               （各含 实体 + Aengine CachedJDBCRepository 仓储 + Service 领域逻辑）
 └── infra
     ├── llm      LLM 补全抽象 ILlmClient + 假实现 MockLlmClient
     ├── vector   向量库抽象 IVectorStore + 内存假实现 InMemoryVectorStore + pgvector 真实现 PgVectorStore
-    └── persistence  自写 PG 持久化层（PgDb/PgRepository/CachedPgRepository）
+    └── persistence  Aengine DB 的 PG 兼容适配（供 HTTP Store/pgvector 过渡使用）
 ```
 
 ## 协议（消息号段与请求→响应）
@@ -49,7 +50,8 @@ JSON 兼容、消息类名 `_<id>` 后缀、`int64` 序列化为字符串（§3.
 - **DB 开**：`PgVectorStore`，基于 `PgDb` + pgvector，读写 `t_self_vector.embedding vector(768)`。
 
 维度常量集中在 `IVectorStore.DIM = 768`（与 `schema.sql` 一致）。`encode` 为确定性占位哈希
-（接口默认方法，两实现共享），待真实嵌入模型替换。列归属：关系元数据由 `SelfVectorRepository`
+（接口默认方法，两实现共享），待真实嵌入模型替换。启动配置若指定非 768 维会直接失败；
+每行同时记录 provider/model/version/embeddedAt，不同模型身份的向量不会混合检索。列归属：关系元数据由 `SelfVectorRepository`
 通用 CRUD 维护（含建行），`embedding` 列仅由 `PgVectorStore` 维护。实际 SQL：
 
 ```sql
@@ -59,9 +61,14 @@ UPDATE "t_self_vector" SET "embedding" = ?::vector WHERE "accountId" = ?;
 -- topN（余弦距离升序，过滤距离 > threshold，取前 k）
 SELECT "accountId", ("embedding" <=> ?::vector) AS score
 FROM "t_self_vector"
-WHERE "embedding" IS NOT NULL AND ("embedding" <=> ?::vector) <= ?
+WHERE "embedding" IS NOT NULL
+  AND "embedProvider" = ? AND "embedModel" = ? AND "embedVersion" = ?
+  AND ("embedding" <=> ?::vector) <= ?
 ORDER BY score ASC LIMIT ?;
 ```
+
+近邻检索使用 `vector_cosine_ops` HNSW 索引。模型切换后由 `VectorRebuildService` 按账号批次显式回填，
+不会在启动阶段扫描全表或自动产生供应商调用费用。模型版本通过 `ECHO_EMBED_VERSION` 配置。
 
 ## 心跳与连接 idle 超时（§3.1，BE 结论）
 
@@ -120,7 +127,8 @@ mvn -q -DskipTests exec:java -Dexec.mainClass=com.echo.bootstrap.EchoServer -Dex
 ```
 
 > 默认无 DB：仅心跳 Handler 注册，WebSocket 就绪。设 `-Decho.db.enabled=true -Decho.db.config=<path>`
-> 启用登录 + 意识档案/空间/共鸣/回声业务闭环（仓储构造即连库并自动建表）。
+> 启用登录 + 意识档案/空间/共鸣/回声业务闭环。标准配置使用 `db.schemaMode=validate`：
+> 启动时校验 `t_schema_version` 以及 Repository 所需表/列，任何不一致直接拒绝启动，不自动改库。
 
 ## 测试
 

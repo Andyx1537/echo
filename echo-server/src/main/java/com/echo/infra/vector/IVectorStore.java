@@ -1,5 +1,6 @@
 package com.echo.infra.vector;
 
+import com.echo.infra.embedding.EmbeddingDescriptor;
 import java.util.List;
 
 /**
@@ -21,6 +22,17 @@ public interface IVectorStore {
      * 集中在此一处定义，编码/建表/检索统一引用。
      */
     int DIM = 768;
+
+    default EmbeddingDescriptor descriptor() {
+        return new EmbeddingDescriptor("internal", "legacy", "v1", DIM);
+    }
+
+    static void requireDimension(float[] vector) {
+        if (vector == null || vector.length != DIM) {
+            throw new IllegalArgumentException("vector dimension mismatch: expected=" + DIM
+                    + ", actual=" + (vector == null ? "null" : vector.length));
+        }
+    }
 
     /**
      * 将补全后的偏好文本编码为个人向量（占位实现：确定性哈希）。

@@ -2,6 +2,7 @@ package com.echo.infra.vector;
 
 import com.echo.infra.embedding.IEmbeddingClient;
 import com.echo.infra.embedding.MockEmbeddingClient;
+import com.echo.infra.embedding.EmbeddingDescriptor;
 import com.echo.infra.persistence.PgDb;
 import lombok.extern.slf4j.Slf4j;
 
@@ -48,11 +49,19 @@ public class PgVectorStore implements IVectorStore {
 
     @Override
     public float[] encode(String enrichedPrefs) {
-        return embeddingClient.embed(enrichedPrefs);
+        float[] vector = embeddingClient.embed(enrichedPrefs);
+        IVectorStore.requireDimension(vector);
+        return vector;
+    }
+
+    @Override
+    public EmbeddingDescriptor descriptor() {
+        return embeddingClient.descriptor();
     }
 
     @Override
     public void upsert(long accountId, float[] vector) {
+        IVectorStore.requireDimension(vector);
         String sql = "UPDATE \"t_self_vector\" SET \"embedding\" = ?::vector WHERE \"accountId\" = ?";
         String literal = toVectorLiteral(vector);
         try {
@@ -70,15 +79,24 @@ public class PgVectorStore implements IVectorStore {
 
     @Override
     public float[] get(long accountId) {
+        EmbeddingDescriptor descriptor = descriptor();
         String sql = "SELECT \"embedding\"::text AS embedding FROM \"t_self_vector\" "
-                + "WHERE \"accountId\" = ? AND \"embedding\" IS NOT NULL LIMIT 1";
+                + "WHERE \"accountId\" = ? AND \"embedProvider\" = ? AND \"embedModel\" = ? "
+                + "AND \"embedVersion\" = ? AND \"embedding\" IS NOT NULL LIMIT 1";
         try {
-            List<Map<String, Object>> rows = db.query(sql, ps -> ps.setLong(1, accountId));
+            List<Map<String, Object>> rows = db.query(sql, ps -> {
+                ps.setLong(1, accountId);
+                ps.setString(2, descriptor.provider());
+                ps.setString(3, descriptor.model());
+                ps.setString(4, descriptor.version());
+            });
             if (rows.isEmpty()) {
                 return null;
             }
             Object v = rows.get(0).get("embedding");
-            return v == null ? null : parseVectorLiteral(v.toString());
+            float[] vector = v == null ? null : parseVectorLiteral(v.toString());
+            if (vector != null) IVectorStore.requireDimension(vector);
+            return vector;
         } catch (SQLException e) {
             throw new RuntimeException("pgvector get failed, accountId=" + accountId, e);
         }
@@ -86,18 +104,24 @@ public class PgVectorStore implements IVectorStore {
 
     @Override
     public List<ScoredId> topN(float[] query, int k, double threshold) {
+        IVectorStore.requireDimension(query);
+        EmbeddingDescriptor descriptor = descriptor();
         // WHERE 不能引用 SELECT 别名，故 <=> 表达式在 SELECT 与 WHERE 各出现一次（query 绑定两次）。
         String sql = "SELECT \"accountId\" AS \"accountId\", (\"embedding\" <=> ?::vector) AS score "
                 + "FROM \"t_self_vector\" "
-                + "WHERE \"embedding\" IS NOT NULL AND (\"embedding\" <=> ?::vector) <= ? "
+                + "WHERE \"embedding\" IS NOT NULL AND \"embedProvider\" = ? AND \"embedModel\" = ? "
+                + "AND \"embedVersion\" = ? AND (\"embedding\" <=> ?::vector) <= ? "
                 + "ORDER BY score ASC LIMIT ?";
         String literal = toVectorLiteral(query);
         try {
             List<Map<String, Object>> rows = db.query(sql, ps -> {
                 ps.setString(1, literal);
-                ps.setString(2, literal);
-                ps.setDouble(3, threshold);
-                ps.setInt(4, Math.max(0, k));
+                ps.setString(2, descriptor.provider());
+                ps.setString(3, descriptor.model());
+                ps.setString(4, descriptor.version());
+                ps.setString(5, literal);
+                ps.setDouble(6, threshold);
+                ps.setInt(7, Math.max(0, k));
             });
             List<ScoredId> result = new ArrayList<>(rows.size());
             for (Map<String, Object> row : rows) {

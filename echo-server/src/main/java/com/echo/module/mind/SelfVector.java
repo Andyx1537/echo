@@ -44,4 +44,16 @@ public class SelfVector implements AbstractEntity {
     /** 归一化哈希，用于幂等/去重校验。 */
     @Column(name = "normHash", length = 64, comment = "归一化哈希")
     private String normHash;
+
+    @Column(name = "embedProvider", length = 32, comment = "嵌入供应商")
+    private String embedProvider;
+
+    @Column(name = "embedModel", length = 128, comment = "嵌入模型")
+    private String embedModel;
+
+    @Column(name = "embedVersion", length = 64, comment = "嵌入模型版本")
+    private String embedVersion;
+
+    @Column(name = "embeddedAt", comment = "最近向量生成时间")
+    private long embeddedAt;
 }

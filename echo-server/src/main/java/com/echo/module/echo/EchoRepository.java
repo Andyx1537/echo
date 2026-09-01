@@ -1,7 +1,7 @@
 package com.echo.module.echo;
 
 import com.aengine.persistence.annotation.CRepository;
-import com.echo.infra.persistence.CachedPgRepository;
+import com.aengine.persistence.db.CachedJDBCRepository;
 
 import java.sql.SQLException;
 
@@ -9,7 +9,7 @@ import java.sql.SQLException;
  * {@link Echo} 仓储（PostgreSQL + 内存缓存）。
  */
 @CRepository(source = "echo")
-public class EchoRepository extends CachedPgRepository<Echo> {
+public class EchoRepository extends CachedJDBCRepository<Echo> {
 
     /**
      * 删除已过期回声（{@code expireAt < now}），供 scheduler 定时清理。

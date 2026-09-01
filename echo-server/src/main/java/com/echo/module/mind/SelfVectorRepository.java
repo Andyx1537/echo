@@ -1,7 +1,7 @@
 package com.echo.module.mind;
 
 import com.aengine.persistence.annotation.CRepository;
-import com.echo.infra.persistence.CachedPgRepository;
+import com.aengine.persistence.db.CachedJDBCRepository;
 
 /**
  * {@link SelfVector} 仓储（PostgreSQL + 内存缓存）。
@@ -10,5 +10,5 @@ import com.echo.infra.persistence.CachedPgRepository;
  * 由 {@code IVectorStore} 通道处理；本仓储只管理向量元数据列。</p>
  */
 @CRepository(source = "echo")
-public class SelfVectorRepository extends CachedPgRepository<SelfVector> {
+public class SelfVectorRepository extends CachedJDBCRepository<SelfVector> {
 }

@@ -22,6 +22,7 @@ import java.util.Properties;
  * <p>配置文件键：</p>
  * <pre>
  * db.name=echo
+ * db.dialect=postgresql
  * jdbcUrl=jdbc:postgresql://127.0.0.1:5432/echo
  * driverClassName=org.postgresql.Driver
  * username=echo
@@ -31,6 +32,9 @@ import java.util.Properties;
  */
 @Slf4j
 public final class EchoDatabase {
+
+    /** 与 schema.sql 当前基线一致；后续每个迁移版本只递增不复用。 */
+    public static final long REQUIRED_SCHEMA_VERSION = 2026083102L;
 
     /** 开启 DB 的系统属性开关。 */
     public static final String PROP_DB_ENABLED = "echo.db.enabled";
@@ -58,23 +62,33 @@ public final class EchoDatabase {
         }
         String configPath = System.getProperty(PROP_DB_CONFIG);
         if (configPath == null || configPath.isBlank()) {
-            log.error("已开启 DB 但未提供 {}，无法初始化数据源。", PROP_DB_CONFIG);
-            return false;
+            throw new IllegalStateException("已开启 DB 但未提供 " + PROP_DB_CONFIG);
         }
         Path path = Path.of(configPath);
         if (!Files.exists(path)) {
-            log.error("DB 配置文件不存在: {}", configPath);
-            return false;
+            throw new IllegalStateException("DB 配置文件不存在: " + configPath);
         }
         Properties properties = new Properties();
         try (InputStream in = new FileInputStream(path.toFile())) {
             properties.load(in);
-            PgDbManager.getInstance().add(new PgDb(properties));
+            PgDb db = new PgDb(properties);
+            verifySchemaVersion(db);
+            PgDbManager.getInstance().add(db);
             log.info("PostgreSQL 数据源已注册: name={}", properties.getProperty("db.name", "echo"));
             return true;
         } catch (Exception e) {
-            log.error("初始化 PostgreSQL 失败，进程将以无 DB 模式继续启动", e);
-            return false;
+            throw new IllegalStateException("初始化 PostgreSQL 或校验 Schema 失败", e);
+        }
+    }
+
+    private static void verifySchemaVersion(PgDb db) throws Exception {
+        var rows = db.query("SELECT MAX(\"version\") AS \"version\" FROM \"t_schema_version\"");
+        Object value = rows.isEmpty() ? null : rows.get(0).get("version");
+        long actual = value instanceof Number number ? number.longValue() : -1L;
+        if (actual != REQUIRED_SCHEMA_VERSION) {
+            db.shutdown();
+            throw new IllegalStateException("Schema 版本不匹配: required=" + REQUIRED_SCHEMA_VERSION
+                    + ", actual=" + actual + "；请先执行 echo-server/src/main/resources/sql/schema.sql");
         }
     }
 }

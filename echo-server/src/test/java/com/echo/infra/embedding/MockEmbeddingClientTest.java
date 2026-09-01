@@ -4,6 +4,7 @@ import com.echo.infra.vector.InMemoryVectorStore;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link MockEmbeddingClient} 单测：确定性、默认维度，且与向量库既有确定性哈希<b>逐位一致</b>
@@ -39,8 +40,20 @@ class MockEmbeddingClientTest {
     @Test
     void vectorStoreUsesInjectedEmbeddingClient() {
         // 注入自定义嵌入通道后，encode 委托给它
-        IEmbeddingClient fixed = text -> new float[]{9f, 9f, 9f};
+        IEmbeddingClient fixed = text -> {
+            float[] vector = new float[IEmbeddingClient.DEFAULT_DIM];
+            java.util.Arrays.fill(vector, 9f);
+            return vector;
+        };
         InMemoryVectorStore store = new InMemoryVectorStore(fixed);
-        assertThat(store.encode("任意")).containsExactly(9f, 9f, 9f);
+        assertThat(store.encode("任意")).hasSize(IEmbeddingClient.DEFAULT_DIM).containsOnly(9f);
+    }
+
+    @Test
+    void vectorStoreRejectsWrongDimension() {
+        InMemoryVectorStore store = new InMemoryVectorStore(text -> new float[3]);
+        assertThatThrownBy(() -> store.encode("任意"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("expected=768, actual=3");
     }
 }

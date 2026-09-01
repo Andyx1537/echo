@@ -8,6 +8,7 @@
 #
 # 说明：
 #   - 镜像 pgvector/pgvector:pg16 已内置 pgvector 扩展（schema.sql 里的 CREATE EXTENSION vector 可直接执行）。
+#   - schema.sql 写入 t_schema_version；已有卷升级后需手动重跑脚本，应用不会自动改库。
 #   - 库名 echo / 账号 echo / 密码 echo / 端口 5432，与 deploy/echo-db.properties 一致。
 #   - 数据持久化到命名卷 echo-pgdata。
 #
