@@ -16,6 +16,13 @@ class SchemaContractTest {
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_schema_version\"");
             assertThat(sql).contains("(" + EchoDatabase.REQUIRED_SCHEMA_VERSION + ",");
             assertThat(sql).contains("USING hnsw (\"embedding\" vector_cosine_ops)");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_behavior_event\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_explicit_feedback\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_user_hypothesis\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_adaptation_decision\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_adaptation_profile_clear\"");
+            assertThat(sql).contains("UNIQUE (\"accountId\", \"idempotencyKey\")");
+            assertThat(sql).contains("\"status\" IN ('active','expired','rejected','cleared')");
         }
     }
 

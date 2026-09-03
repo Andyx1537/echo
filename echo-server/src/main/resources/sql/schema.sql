@@ -1333,8 +1333,197 @@ CREATE INDEX IF NOT EXISTS "t_resource_idx_owner"
 CREATE INDEX IF NOT EXISTS "t_resource_idx_key"
     ON "t_resource" ("storageKey");
 
+-- ============================== 行为证据与适配（G-30 / G-34） ==============================
+-- 四类对象分存。所谓“清除适配档案”只让在线结果退出生效链，不物理删除技术积累。
+
+CREATE TABLE IF NOT EXISTS "t_behavior_event" (
+    "eventId"              varchar(64)  NOT NULL,
+    "accountId"            bigint       NOT NULL,
+    "anonymousState"       varchar(16)  NOT NULL,
+    "sessionId"            varchar(64)  NOT NULL,
+    "eventName"            varchar(64)  NOT NULL,
+    "surface"              varchar(64)  NOT NULL,
+    "targetType"           varchar(64)  NOT NULL,
+    "targetId"             varchar(128),
+    "activeDurationMs"     bigint,
+    "foregroundDurationMs" bigint,
+    "loadWaitMs"           bigint,
+    "attemptCount"         integer,
+    "backtrackCount"       integer,
+    "contextJson"          jsonb        NOT NULL DEFAULT '{}'::jsonb,
+    "occurredAt"           bigint       NOT NULL,
+    "receivedAt"           bigint       NOT NULL,
+    "schemaVersion"        integer      NOT NULL,
+    "purposeCode"          varchar(32)  NOT NULL,
+    "idempotencyKey"       varchar(128) NOT NULL,
+    "validityStatus"       varchar(16)  NOT NULL DEFAULT 'valid',
+    "invalidReason"        varchar(64),
+    PRIMARY KEY ("eventId"),
+    CONSTRAINT "t_behavior_event_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_behavior_event_uk_idempotency" UNIQUE ("accountId", "idempotencyKey"),
+    CONSTRAINT "t_behavior_event_ck_anonymous" CHECK ("anonymousState" IN ('anonymous','bound')),
+    CONSTRAINT "t_behavior_event_ck_purpose" CHECK ("purposeCode" IN ('ui_adaptation','public_recommendation','private_generation')),
+    CONSTRAINT "t_behavior_event_ck_validity" CHECK ("validityStatus" IN ('valid','invalid')),
+    CONSTRAINT "t_behavior_event_ck_durations" CHECK (
+        ("activeDurationMs" IS NULL OR "activeDurationMs" >= 0) AND
+        ("foregroundDurationMs" IS NULL OR "foregroundDurationMs" >= 0) AND
+        ("loadWaitMs" IS NULL OR "loadWaitMs" >= 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS "t_behavior_event_idx_account_scope_time"
+    ON "t_behavior_event" ("accountId", "purposeCode", "occurredAt" DESC);
+CREATE INDEX IF NOT EXISTS "t_behavior_event_idx_processing"
+    ON "t_behavior_event" ("receivedAt", "eventId") WHERE "validityStatus" = 'valid';
+
+CREATE TABLE IF NOT EXISTS "t_explicit_feedback" (
+    "feedbackId"       varchar(64)  NOT NULL,
+    "accountId"        bigint       NOT NULL,
+    "scope"            varchar(32)  NOT NULL,
+    "targetType"       varchar(64)  NOT NULL,
+    "targetId"         varchar(128) NOT NULL,
+    "questionCode"     varchar(64)  NOT NULL,
+    "answerCode"       varchar(64)  NOT NULL,
+    "answerVersion"    integer      NOT NULL,
+    "sourceSurface"    varchar(64)  NOT NULL,
+    "occurredAt"       bigint       NOT NULL,
+    "supersedesId"     varchar(64),
+    "status"           varchar(16)  NOT NULL DEFAULT 'active',
+    PRIMARY KEY ("feedbackId"),
+    CONSTRAINT "t_explicit_feedback_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_explicit_feedback_fk_supersedes" FOREIGN KEY ("supersedesId")
+        REFERENCES "t_explicit_feedback" ("feedbackId") ON DELETE RESTRICT,
+    CONSTRAINT "t_explicit_feedback_ck_scope" CHECK ("scope" IN ('ui_adaptation','public_recommendation','private_generation')),
+    CONSTRAINT "t_explicit_feedback_ck_status" CHECK ("status" IN ('active','superseded','revoked'))
+);
+
+CREATE INDEX IF NOT EXISTS "t_explicit_feedback_idx_current"
+    ON "t_explicit_feedback" ("accountId", "scope", "questionCode", "occurredAt" DESC)
+    WHERE "status" = 'active';
+
+CREATE TABLE IF NOT EXISTS "t_user_hypothesis" (
+    "hypothesisId"     varchar(64)  NOT NULL,
+    "accountId"        bigint       NOT NULL,
+    "scope"            varchar(32)  NOT NULL,
+    "dimension"        varchar(64)  NOT NULL,
+    "valueCode"        varchar(64)  NOT NULL,
+    "confidenceBand"   varchar(16)  NOT NULL,
+    "evidenceCount"    integer      NOT NULL DEFAULT 0,
+    "algorithmVersion" varchar(32)  NOT NULL,
+    "validFrom"        bigint       NOT NULL,
+    "validUntil"       bigint       NOT NULL,
+    "status"           varchar(16)  NOT NULL DEFAULT 'active',
+    "shadow"           boolean      NOT NULL DEFAULT true,
+    "rejectedAt"       bigint,
+    "clearedAt"        bigint,
+    "clearBatchId"     varchar(64),
+    "updatedAt"        bigint       NOT NULL,
+    PRIMARY KEY ("hypothesisId"),
+    CONSTRAINT "t_user_hypothesis_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_user_hypothesis_ck_scope" CHECK ("scope" IN ('ui_adaptation','public_recommendation','private_generation')),
+    CONSTRAINT "t_user_hypothesis_ck_confidence" CHECK ("confidenceBand" IN ('low','medium','high')),
+    CONSTRAINT "t_user_hypothesis_ck_status" CHECK ("status" IN ('active','expired','rejected','cleared')),
+    CONSTRAINT "t_user_hypothesis_ck_window" CHECK ("validUntil" > "validFrom")
+);
+
+CREATE INDEX IF NOT EXISTS "t_user_hypothesis_idx_active"
+    ON "t_user_hypothesis" ("accountId", "scope", "dimension", "validUntil")
+    WHERE "status" = 'active';
+
+CREATE TABLE IF NOT EXISTS "t_hypothesis_event_evidence" (
+    "hypothesisId" varchar(64) NOT NULL,
+    "eventId"      varchar(64) NOT NULL,
+    PRIMARY KEY ("hypothesisId", "eventId"),
+    CONSTRAINT "t_hypothesis_event_fk_hypothesis" FOREIGN KEY ("hypothesisId")
+        REFERENCES "t_user_hypothesis" ("hypothesisId") ON DELETE RESTRICT,
+    CONSTRAINT "t_hypothesis_event_fk_event" FOREIGN KEY ("eventId")
+        REFERENCES "t_behavior_event" ("eventId") ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS "t_hypothesis_feedback_evidence" (
+    "hypothesisId" varchar(64) NOT NULL,
+    "feedbackId"   varchar(64) NOT NULL,
+    PRIMARY KEY ("hypothesisId", "feedbackId"),
+    CONSTRAINT "t_hypothesis_feedback_fk_hypothesis" FOREIGN KEY ("hypothesisId")
+        REFERENCES "t_user_hypothesis" ("hypothesisId") ON DELETE RESTRICT,
+    CONSTRAINT "t_hypothesis_feedback_fk_feedback" FOREIGN KEY ("feedbackId")
+        REFERENCES "t_explicit_feedback" ("feedbackId") ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS "t_adaptation_decision" (
+    "decisionId"    varchar(64) NOT NULL,
+    "accountId"     bigint      NOT NULL,
+    "scope"         varchar(32) NOT NULL,
+    "actionCode"    varchar(64) NOT NULL,
+    "parametersJson" jsonb      NOT NULL DEFAULT '{}'::jsonb,
+    "policyVersion" varchar(32) NOT NULL,
+    "reasonCode"    varchar(64) NOT NULL,
+    "reversible"    boolean     NOT NULL DEFAULT true,
+    "shadow"        boolean     NOT NULL DEFAULT true,
+    "status"        varchar(16) NOT NULL DEFAULT 'active',
+    "appliedAt"     bigint,
+    "expiresAt"     bigint,
+    "revertedAt"    bigint,
+    "revertReason"  varchar(64),
+    "clearBatchId"  varchar(64),
+    PRIMARY KEY ("decisionId"),
+    CONSTRAINT "t_adaptation_decision_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_adaptation_decision_ck_scope" CHECK ("scope" IN ('ui_adaptation','public_recommendation','private_generation')),
+    CONSTRAINT "t_adaptation_decision_ck_status" CHECK ("status" IN ('active','expired','reverted','cleared'))
+);
+
+CREATE INDEX IF NOT EXISTS "t_adaptation_decision_idx_active"
+    ON "t_adaptation_decision" ("accountId", "scope", "expiresAt")
+    WHERE "status" = 'active';
+
+CREATE TABLE IF NOT EXISTS "t_decision_hypothesis" (
+    "decisionId"   varchar(64) NOT NULL,
+    "hypothesisId" varchar(64) NOT NULL,
+    PRIMARY KEY ("decisionId", "hypothesisId"),
+    CONSTRAINT "t_decision_hypothesis_fk_decision" FOREIGN KEY ("decisionId")
+        REFERENCES "t_adaptation_decision" ("decisionId") ON DELETE RESTRICT,
+    CONSTRAINT "t_decision_hypothesis_fk_hypothesis" FOREIGN KEY ("hypothesisId")
+        REFERENCES "t_user_hypothesis" ("hypothesisId") ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS "t_adaptation_preference" (
+    "accountId" bigint      NOT NULL,
+    "scope"     varchar(32) NOT NULL,
+    "mode"      varchar(32) NOT NULL DEFAULT 'default',
+    "version"   bigint      NOT NULL DEFAULT 0,
+    "updatedAt" bigint      NOT NULL,
+    PRIMARY KEY ("accountId", "scope"),
+    CONSTRAINT "t_adaptation_preference_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_adaptation_preference_ck_scope" CHECK ("scope" IN ('ui_adaptation','public_recommendation','private_generation')),
+    CONSTRAINT "t_adaptation_preference_ck_mode" CHECK ("mode" IN ('default','personalized','non_personalized'))
+);
+
+CREATE TABLE IF NOT EXISTS "t_adaptation_profile_clear" (
+    "clearId"                 varchar(64) NOT NULL,
+    "accountId"               bigint      NOT NULL,
+    "scope"                   varchar(32) NOT NULL,
+    "clearedAt"               bigint      NOT NULL,
+    "reason"                  varchar(64) NOT NULL DEFAULT 'user_requested',
+    "affectedHypothesisCount" integer     NOT NULL DEFAULT 0,
+    "affectedDecisionCount"   integer     NOT NULL DEFAULT 0,
+    "policyVersion"           varchar(32) NOT NULL,
+    PRIMARY KEY ("clearId"),
+    CONSTRAINT "t_adaptation_clear_fk_account" FOREIGN KEY ("accountId")
+        REFERENCES "t_account" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_adaptation_clear_ck_scope" CHECK ("scope" IN ('ui_adaptation','public_recommendation','private_generation'))
+);
+
+CREATE INDEX IF NOT EXISTS "t_adaptation_clear_idx_account_time"
+    ON "t_adaptation_profile_clear" ("accountId", "clearedAt" DESC);
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
-       (2026083102, 1788181200000)
+       (2026083102, 1788181200000),
+       (2026090301, 1788418800000)
 ON CONFLICT ("version") DO NOTHING;
