@@ -1,6 +1,8 @@
 package com.echo.http;
 
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 极简 multipart/form-data 解析器（二进制安全），只取第一个带 filename 的文件分段。
@@ -75,6 +77,38 @@ public final class MultipartParser {
             pos = nextDelim;
         }
         return null;
+    }
+
+    /** Parse UTF-8 text fields accompanying the single file part. */
+    public static Map<String, String> parseTextFields(byte[] body, String contentType) {
+        Map<String, String> out = new LinkedHashMap<>();
+        String boundary = extractBoundary(contentType);
+        if (boundary == null || body == null) return out;
+        byte[] delim = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
+        byte[] crlfcrlf = {13, 10, 13, 10};
+        int pos = 0;
+        while (pos < body.length) {
+            int start = indexOf(body, delim, pos);
+            if (start < 0) break;
+            int partStart = start + delim.length;
+            if (partStart + 2 <= body.length && body[partStart] == '-' && body[partStart + 1] == '-') break;
+            if (partStart + 2 <= body.length && body[partStart] == 13 && body[partStart + 1] == 10) partStart += 2;
+            int next = indexOf(body, delim, partStart);
+            if (next < 0) break;
+            int headerEnd = indexOf(body, crlfcrlf, partStart);
+            if (headerEnd < 0 || headerEnd > next) { pos = next; continue; }
+            String headers = new String(body, partStart, headerEnd - partStart, StandardCharsets.ISO_8859_1);
+            String name = headerParam(headers, "name");
+            String filename = headerParam(headers, "filename");
+            int contentStart = headerEnd + crlfcrlf.length;
+            int contentEnd = next;
+            if (contentEnd - 2 >= contentStart && body[contentEnd - 2] == 13 && body[contentEnd - 1] == 10) contentEnd -= 2;
+            if (name != null && filename == null) {
+                out.put(name, new String(body, contentStart, Math.max(0, contentEnd - contentStart), StandardCharsets.UTF_8));
+            }
+            pos = next;
+        }
+        return out;
     }
 
     private static String extractBoundary(String contentType) {

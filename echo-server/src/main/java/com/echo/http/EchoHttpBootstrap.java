@@ -29,6 +29,12 @@ import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
 import com.echo.http.work.WorkStore;
+import com.echo.http.onboarding.EchoOnboardingWindowPort;
+import com.echo.http.onboarding.ExecutorOnboardingGenerationPort;
+import com.echo.http.onboarding.InMemoryOnboardingRepository;
+import com.echo.http.onboarding.OnboardingApi;
+import com.echo.http.onboarding.OnboardingRepository;
+import com.echo.http.onboarding.PgOnboardingRepository;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
 import com.echo.infra.llm.ILlmClient;
@@ -201,7 +207,19 @@ public final class EchoHttpBootstrap {
                 new LinkedBlockingQueue<>(256),
                 new NamedThreadFactory("echo-http"));
 
-        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor);
+        OnboardingRepository onboardingRepository = persistent
+                ? new PgOnboardingRepository(pgDb)
+                : new InMemoryOnboardingRepository();
+        OnboardingApi onboarding = new OnboardingApi(
+                onboardingRepository,
+                accountId -> BindingGuard.isBound(store, accountId),
+                new ExecutorOnboardingGenerationPort(effectiveLlm, idGenerator, executor),
+                new EchoOnboardingWindowPort(store, idGenerator),
+                vision,
+                idGenerator);
+        onboarding.register(router);
+
+        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor, onboarding);
         try {
             gateway.start();
         } catch (Exception e) {

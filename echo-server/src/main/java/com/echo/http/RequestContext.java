@@ -14,14 +14,22 @@ public final class RequestContext {
     private final Map<String, String> query;
     private final JsonObject body;
     private final long accountId;
+    private final Map<String, String> headers;
 
     public RequestContext(String method, Map<String, String> pathParams,
                           Map<String, String> query, JsonObject body, long accountId) {
+        this(method, pathParams, query, body, accountId, Map.of());
+    }
+
+    public RequestContext(String method, Map<String, String> pathParams,
+                          Map<String, String> query, JsonObject body, long accountId,
+                          Map<String, String> headers) {
         this.method = method;
         this.pathParams = pathParams;
         this.query = query;
         this.body = body;
         this.accountId = accountId;
+        this.headers = headers == null ? Map.of() : Map.copyOf(headers);
     }
 
     public String method() {
@@ -70,5 +78,9 @@ public final class RequestContext {
     /** 已鉴权的账号 ID（公共路由如 /auth/guest 时为 0）。 */
     public long accountId() {
         return accountId;
+    }
+
+    public String header(String name) {
+        return headers.get(name.toLowerCase(java.util.Locale.ROOT));
     }
 }

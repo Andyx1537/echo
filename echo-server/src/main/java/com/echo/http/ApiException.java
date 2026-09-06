@@ -1,5 +1,7 @@
 package com.echo.http;
 
+import java.util.Map;
+
 /**
  * 业务异常：携带契约错误码段（1xxx 鉴权 / 2xxx 参数 / 3xxx 业务规则 / 5xxx 服务端）与
  * 面向用户的温柔文案（构造时即过 {@link CopyGuardFilter}，确保错误提示也守词表——定案 #6）。
@@ -26,19 +28,26 @@ public class ApiException extends RuntimeException {
     public static final int RULE_QUOTA_EXCEEDED = 3001;
     public static final int RULE_FORBIDDEN = 3002;
     public static final int NOT_FOUND = 2004;
+    public static final int GONE = 2410;
     public static final int SERVER_ERROR = 5000;
 
     private final int code;
     private final String detail;
+    private final Map<String, Object> data;
 
     public ApiException(int code, String userMsg) {
         this(code, userMsg, null);
     }
 
     public ApiException(int code, String userMsg, String detail) {
+        this(code, userMsg, detail, null);
+    }
+
+    public ApiException(int code, String userMsg, String detail, Map<String, Object> data) {
         super(CopyGuardFilter.sanitize(userMsg));
         this.code = code;
         this.detail = detail;
+        this.data = data;
     }
 
     public int code() {
@@ -47,5 +56,9 @@ public class ApiException extends RuntimeException {
 
     public String detail() {
         return detail;
+    }
+
+    public Map<String, Object> data() {
+        return data;
     }
 }

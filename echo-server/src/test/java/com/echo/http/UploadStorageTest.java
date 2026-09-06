@@ -45,6 +45,23 @@ class UploadStorageTest {
     }
 
     @Test
+    void parsesOnboardingTextFieldsAlongsideBinaryFile() throws IOException {
+        String boundary = "----EchoOnboardingBoundary";
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"mediaType\"\r\n\r\n"
+                + "image\r\n--" + boundary
+                + "\r\nContent-Disposition: form-data; name=\"expectedSessionVersion\"\r\n\r\n"
+                + "4\r\n").getBytes(StandardCharsets.UTF_8));
+        out.write(buildMultipart(boundary, "file", "pet.png", "image/png", new byte[]{0, 1, 2}));
+
+        Map<String, String> fields = MultipartParser.parseTextFields(
+                out.toByteArray(), "multipart/form-data; boundary=" + boundary);
+
+        assertThat(fields).containsEntry("mediaType", "image")
+                .containsEntry("expectedSessionVersion", "4");
+    }
+
+    @Test
     void localStorageRoundTrip(@TempDir Path dir) {
         IStorage storage = new LocalDiskStorage(dir.toString(), "");
         byte[] data = {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x00, 0x42};

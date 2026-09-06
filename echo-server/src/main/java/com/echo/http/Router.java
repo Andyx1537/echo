@@ -37,6 +37,11 @@ public final class Router {
             this.entry = entry;
             this.pathParams = pathParams;
         }
+
+        /** Execute the matched route without exposing the route entry internals. */
+        public Object handle(RequestContext context) throws Exception {
+            return entry.route.handle(context);
+        }
     }
 
     private final List<Entry> entries = new ArrayList<>();

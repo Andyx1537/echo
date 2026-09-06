@@ -66,11 +66,18 @@ public final class Json {
 
     /** 错误信封（msg 已在 {@link ApiException} 里过词表）。 */
     public static String error(int code, String msg, String detail) {
+        return error(code, msg, detail, null);
+    }
+
+    public static String error(int code, String msg, String detail, Object data) {
         Map<String, Object> env = new LinkedHashMap<>();
         env.put("code", code);
         env.put("msg", msg);
         if (detail != null) {
             env.put("detail", detail);
+        }
+        if (data != null) {
+            env.put("data", data);
         }
         return GSON.toJson(env);
     }
