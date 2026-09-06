@@ -1,6 +1,7 @@
 package com.echo.http.onboarding;
 
 import com.aengine.util.id.IDGenerator;
+import com.echo.http.ApiException;
 import com.echo.http.store.InMemoryEchoStore;
 import com.echo.infra.persistence.PgDb;
 import org.junit.jupiter.api.AfterAll;
@@ -11,6 +12,11 @@ import org.junit.jupiter.api.Test;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -90,6 +96,60 @@ class PgOnboardingRepositoryTest {
         assertThat(count("SELECT COUNT(*) AS n FROM \"t_pet\" WHERE \"ownerAccountId\"=" + ACCOUNT_ID))
                 .isEqualTo(1L);
         assertThat(new PgOnboardingRepository(db).find(session.onboardingId).status).isEqualTo("confirmed");
+    }
+
+    @Test
+    void concurrentConfirmationWithDifferentKeysCreatesOnlyOneWindow() throws Exception {
+        PgOnboardingRepository repository = new PgOnboardingRepository(db);
+        OnboardingAggregate session = readySession();
+        repository.create(session);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+        try {
+            Future<Object> first = pool.submit(() -> confirmAfterBarrier(repository, session, "confirm-a", ready, go));
+            Future<Object> second = pool.submit(() -> confirmAfterBarrier(repository, session, "confirm-b", ready, go));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            go.countDown();
+
+            Object a = first.get(5, TimeUnit.SECONDS);
+            Object b = second.get(5, TimeUnit.SECONDS);
+            assertThat(java.util.stream.Stream.of(a, b).filter(Map.class::isInstance).count()).isEqualTo(1);
+            assertThat(java.util.stream.Stream.of(a, b)
+                    .filter(ApiException.class::isInstance)
+                    .map(ApiException.class::cast)
+                    .map(ApiException::detail))
+                    .containsExactly("onboarding_version_conflict");
+            assertThat(count("SELECT COUNT(*) AS n FROM \"t_pet\" WHERE \"ownerAccountId\"=" + ACCOUNT_ID))
+                    .isEqualTo(1L);
+            assertThat(repository.find(session.onboardingId).status).isEqualTo("confirmed");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private Object confirmAfterBarrier(PgOnboardingRepository repository, OnboardingAggregate session,
+                                       String key, CountDownLatch ready, CountDownLatch go) {
+        ready.countDown();
+        try {
+            if (!go.await(5, TimeUnit.SECONDS)) throw new AssertionError("confirmation barrier timed out");
+            EchoOnboardingWindowPort windows = new EchoOnboardingWindowPort(new InMemoryEchoStore(), ids);
+            return repository.mutate(session.onboardingId, ACCOUNT_ID, 0, key, key + "-hash",
+                    (aggregate, transaction) -> {
+                        OnboardingWindowPort.Result window = windows.confirm(
+                                aggregate, aggregate.candidates.getFirst(), transaction);
+                        aggregate.confirmedPetId = window.petId();
+                        aggregate.confirmedWindowId = window.windowId();
+                        aggregate.status = "confirmed";
+                        aggregate.currentStep = "done";
+                        return Map.of("petId", window.petId(), "windowId", window.windowId());
+                    });
+        } catch (ApiException e) {
+            return e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 
     private OnboardingAggregate readySession() {
