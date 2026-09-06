@@ -105,8 +105,13 @@ public final class OnboardingApi {
             OnboardingAggregate.Subject selected = s.subjects.stream()
                     .filter(value -> subjectId.equals(value.subjectId)).findFirst()
                     .orElseThrow(() -> error("subject_selection_required"));
+            OnboardingAggregate.Subject reference = acceptedReferenceSubject(s, selected.assetId);
+            if (reference != null && !sameOrUnknownSpecies(reference.species, selected.species)) {
+                throw error("subject_inconsistent");
+            }
             s.subjects.forEach(value -> value.userSelected = value == selected);
             selected.userSelected = true;
+            if (reference != null) selected.identityClusterId = reference.identityClusterId;
             s.selectedSubjectId = subjectId;
             OnboardingAggregate.Crop crop = crop(body.getAsJsonObject("crop"));
             selected.boundingBox = crop;
@@ -327,11 +332,14 @@ public final class OnboardingApi {
             asset.resourceId = resourceId;
             asset.mediaType = normalizedMediaType;
             asset.slotIndex = (int) count;
-            asset.qualityState = "pending_subject_selection";
+            OnboardingAggregate.Subject reference = acceptedReferenceSubject(s, null);
+            asset.qualityState = reference == null
+                    ? "pending_subject_selection" : "pending_identity_confirmation";
             asset.identityState = "pending";
             asset.createdAt = System.currentTimeMillis();
             s.assets.add(asset);
             DetectResult detected = vision.detectWithSource(resourceId);
+            List<OnboardingAggregate.Subject> detectedSubjects = new ArrayList<>();
             for (DetectSubject value : detected.subjects()) {
                 if (value.subjectType() != DetectSubject.SubjectType.ANIMAL) continue;
                 OnboardingAggregate.Subject subject = new OnboardingAggregate.Subject();
@@ -347,9 +355,14 @@ public final class OnboardingApi {
                 }
                 subject.identityClusterId = subject.subjectId;
                 s.subjects.add(subject);
+                detectedSubjects.add(subject);
             }
-            if (s.subjects.stream().noneMatch(subject -> asset.assetId.equals(subject.assetId))) {
+            if (detectedSubjects.isEmpty()) {
                 throw error("asset_quality_failed");
+            }
+            if (reference != null && detectedSubjects.stream()
+                    .noneMatch(subject -> sameOrUnknownSpecies(reference.species, subject.species))) {
+                throw error("subject_inconsistent");
             }
             s.currentStep = "subject_select";
             Map<String, Object> out = response(s);
@@ -418,7 +431,9 @@ public final class OnboardingApi {
 
     private static void advance(OnboardingAggregate s) {
         boolean hasImage = s.assets.stream().anyMatch(a -> "image".equals(a.mediaType) && "accepted".equals(a.qualityState));
-        if (hasImage && s.selectedSubjectId != null && s.answers.keySet().containsAll(Set.of("Q1", "Q2", "Q3", "Q4"))) {
+        boolean allAssetsResolved = s.assets.stream().allMatch(a -> "accepted".equals(a.qualityState));
+        if (hasImage && allAssetsResolved && s.selectedSubjectId != null
+                && s.answers.keySet().containsAll(Set.of("Q1", "Q2", "Q3", "Q4"))) {
             if ("collecting".equals(s.status)) {
                 s.status = "ready_to_bind";
                 s.currentStep = "bind";
@@ -499,6 +514,29 @@ public final class OnboardingApi {
     private static OnboardingAggregate.Candidate requireCandidate(OnboardingAggregate s, String id) {
         return s.candidates.stream().filter(value -> id.equals(value.candidateId)).findFirst()
                 .orElseThrow(() -> error("candidate_not_found"));
+    }
+
+    private static OnboardingAggregate.Subject acceptedReferenceSubject(OnboardingAggregate s, String excludedAssetId) {
+        for (OnboardingAggregate.Asset asset : s.assets) {
+            if (!"accepted".equals(asset.qualityState) || asset.selectedSubjectId == null
+                    || (excludedAssetId != null && excludedAssetId.equals(asset.assetId))) continue;
+            for (OnboardingAggregate.Subject subject : s.subjects) {
+                if (asset.selectedSubjectId.equals(subject.subjectId)) return subject;
+            }
+        }
+        return null;
+    }
+
+    private static boolean sameOrUnknownSpecies(String left, String right) {
+        String a = normalizedSpecies(left);
+        String b = normalizedSpecies(right);
+        return a == null || b == null || a.equals(b);
+    }
+
+    private static String normalizedSpecies(String value) {
+        if (value == null || value.isBlank()) return null;
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        return Set.of("其他", "未知", "毛孩子", "unknown", "other").contains(normalized) ? null : normalized;
     }
 
     private static OnboardingAggregate.Crop crop(JsonObject value) {

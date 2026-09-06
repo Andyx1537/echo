@@ -11,6 +11,8 @@ import com.echo.http.store.InMemoryEchoStore;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
 import com.echo.infra.llm.MockLlmClient;
 import com.echo.infra.vision.StubVisionClient;
+import com.echo.infra.vision.DetectSubject;
+import com.echo.infra.vision.IVisionClient;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -211,6 +213,59 @@ class OnboardingApiTest {
     }
 
     @Test
+    void rejectsAnObviouslyDifferentPetAcrossAssets() throws Exception {
+        String id = (String) call("POST", "/pet/onboarding", new JsonObject(), "create-consistency")
+                .get("onboardingId");
+        OnboardingApi api = newApi(speciesByResource());
+        api.attachUploadedAsset(accountId, id, "dog-upload", 0,
+                "dog-resource", "image", "dog-fingerprint");
+        OnboardingAggregate first = repository.find(id);
+        JsonObject select = body("subjectId", first.subjects.getFirst().subjectId,
+                "expectedSessionVersion", 1);
+        select.add("crop", body("x", 0.1, "y", 0.1, "w", 0.7, "h", 0.7));
+        callWithApi(api, "POST", "/pet/onboarding/" + id + "/subject/select", select, "select-dog");
+
+        assertThatThrownBy(() -> api.attachUploadedAsset(accountId, id, "cat-upload", 2,
+                "cat-resource", "image", "cat-fingerprint"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.detail()).isEqualTo("subject_inconsistent"));
+        assertThat(repository.find(id).assets).hasSize(1);
+    }
+
+    @Test
+    void unknownSecondAssetRequiresUserConfirmationAndJoinsTheChosenPetCluster() throws Exception {
+        String id = (String) call("POST", "/pet/onboarding", new JsonObject(), "create-unknown")
+                .get("onboardingId");
+        OnboardingApi api = newApi(speciesByResource());
+        api.attachUploadedAsset(accountId, id, "dog-upload-u", 0,
+                "dog-resource", "image", "dog-fingerprint-u");
+        OnboardingAggregate first = repository.find(id);
+        String firstSubjectId = first.subjects.getFirst().subjectId;
+        JsonObject firstSelect = body("subjectId", firstSubjectId, "expectedSessionVersion", 1);
+        firstSelect.add("crop", body("x", 0.1, "y", 0.1, "w", 0.7, "h", 0.7));
+        callWithApi(api, "POST", "/pet/onboarding/" + id + "/subject/select", firstSelect, "select-dog-u");
+
+        api.attachUploadedAsset(accountId, id, "unknown-upload", 2,
+                "unknown-resource", "image", "unknown-fingerprint");
+        OnboardingAggregate pending = repository.find(id);
+        assertThat(pending.assets.get(1).qualityState).isEqualTo("pending_identity_confirmation");
+        String secondSubjectId = pending.subjects.stream()
+                .filter(subject -> pending.assets.get(1).assetId.equals(subject.assetId))
+                .findFirst().orElseThrow().subjectId;
+        JsonObject secondSelect = body("subjectId", secondSubjectId, "expectedSessionVersion", 3);
+        secondSelect.add("crop", body("x", 0.1, "y", 0.1, "w", 0.7, "h", 0.7));
+        callWithApi(api, "POST", "/pet/onboarding/" + id + "/subject/select", secondSelect, "select-unknown");
+
+        OnboardingAggregate confirmed = repository.find(id);
+        OnboardingAggregate.Subject firstSubject = confirmed.subjects.stream()
+                .filter(subject -> firstSubjectId.equals(subject.subjectId)).findFirst().orElseThrow();
+        OnboardingAggregate.Subject secondSubject = confirmed.subjects.stream()
+                .filter(subject -> secondSubjectId.equals(subject.subjectId)).findFirst().orElseThrow();
+        assertThat(secondSubject.identityClusterId).isEqualTo(firstSubject.identityClusterId);
+        assertThat(confirmed.assets.get(1).qualityState).isEqualTo("accepted");
+    }
+
+    @Test
     void legacyRoutesCanReturnEndpointRetired() throws Exception {
         String before = System.getProperty("echo.onboarding.legacy.enabled");
         try {
@@ -253,13 +308,34 @@ class OnboardingApiTest {
     }
 
     private OnboardingApi newApi() {
+        return newApi(new StubVisionClient());
+    }
+
+    private OnboardingApi newApi(IVisionClient vision) {
         OnboardingGenerationPort generation = (jobId, anchor, adjustment, completion) -> {
             OnboardingAggregate.Candidate c = new OnboardingAggregate.Candidate();
             c.candidateId = String.valueOf(ids.nextId()); c.gradient = "sunset"; c.emoji = "🐾"; c.signature = "它";
             completion.accept(List.of(c), null);
         };
         return new OnboardingApi(repository, id -> !accounts.profile(id).guest, generation,
-                new EchoOnboardingWindowPort(accounts, ids), new StubVisionClient(), ids);
+                new EchoOnboardingWindowPort(accounts, ids), vision, ids);
+    }
+
+    private static IVisionClient speciesByResource() {
+        return resourceId -> List.of(DetectSubject.of(DetectSubject.SubjectType.ANIMAL,
+                resourceId.startsWith("dog") ? "狗" : resourceId.startsWith("cat") ? "猫" : "其他", 0.9));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> callWithApi(OnboardingApi api, String method, String path,
+                                            JsonObject body, String key) throws Exception {
+        Router local = new Router();
+        api.register(local);
+        Router.Match match = local.match(method, path);
+        Object result = match.handle(new RequestContext(method, match.pathParams,
+                Map.of(), body, accountId, Map.of("idempotency-key", key)));
+        if (result instanceof HttpResult http) result = http.data();
+        return (Map<String, Object>) result;
     }
 
     private void saveAnswer(String id, String q, long version, String... codes) throws Exception {
