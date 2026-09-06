@@ -235,6 +235,7 @@ class OnboardingApiTest {
         accounts.profile(accountId).guest = false;
         call("POST", "/pet/onboarding/" + id + "/generate",
                 body("expectedSessionVersion", repository.find(id).sessionVersion), "generate-ready");
+        assertThat(repository.find(id).generationJob).isNull();
         return id;
     }
 

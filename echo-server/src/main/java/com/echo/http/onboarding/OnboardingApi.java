@@ -386,19 +386,19 @@ public final class OnboardingApi {
         repository.mutateSystem(id, s -> {
             if (s.generationJob == null || !jobId.equals(s.generationJob.jobId)) return false;
             if (failure != null) {
-                s.generationJob.status = "failed";
                 s.lastOperation = refine ? "refine_failed" : "generate_failed";
                 s.status = refine ? "candidate_ready" : "ready_to_generate";
                 s.currentStep = refine ? "candidate_select" : "generate";
+                s.generationJob = null;
                 return true;
             }
             s.candidates.clear();
             s.candidates.addAll(candidates);
-            s.generationJob.status = "succeeded";
             s.lastOperation = "none";
             s.status = "candidate_ready";
             s.currentStep = "candidate_select";
             s.selectedCandidateId = null;
+            s.generationJob = null;
             return true;
         });
     }
