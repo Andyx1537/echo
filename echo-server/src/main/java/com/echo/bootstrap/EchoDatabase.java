@@ -34,7 +34,7 @@ import java.util.Properties;
 public final class EchoDatabase {
 
     /** 与 schema.sql 当前基线一致；后续每个迁移版本只递增不复用。 */
-    public static final long REQUIRED_SCHEMA_VERSION = 2026090701L;
+    public static final long REQUIRED_SCHEMA_VERSION = 2026090702L;
 
     /** 开启 DB 的系统属性开关。 */
     public static final String PROP_DB_ENABLED = "echo.db.enabled";
