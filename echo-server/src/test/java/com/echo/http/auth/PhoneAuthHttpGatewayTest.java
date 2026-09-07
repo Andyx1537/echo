@@ -19,9 +19,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -213,6 +215,47 @@ class PhoneAuthHttpGatewayTest {
     }
 
     @Test
+    void confirmCanReplayAfterClientDisconnectsBeforeReadingTheCommittedResponse() throws Exception {
+        Response device = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"disconnect-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "disconnect-device");
+        JsonObject deviceData = device.json.getAsJsonObject("data");
+        String accountId = deviceData.get("accountId").getAsString();
+        String anonymousToken = deviceData.get("sessionToken").getAsString();
+
+        Response challenged = post("/auth/phone/challenges", phoneBody("+8613800000310"),
+                anonymousToken, "disconnect-challenge");
+        String challengeId = challenged.json.getAsJsonObject("data").get("challengeId").getAsString();
+        Response verified = post("/auth/phone/challenges/" + challengeId + "/verify",
+                "{\"code\":\"" + sms.codeFor("+8613800000310") + "\"}",
+                anonymousToken, "disconnect-verify");
+        String resolutionToken = verified.json.getAsJsonObject("data").get("resolutionToken").getAsString();
+
+        sendCompleteRequestAndDisconnect("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                anonymousToken, "disconnect-confirm");
+        long account = Long.parseLong(accountId);
+        awaitCount("SELECT COUNT(*) AS n FROM \"t_phone_credential\" WHERE \"accountId\"=?", account, 1);
+
+        Response recovered = post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                "{}", anonymousToken, "disconnect-confirm");
+        assertSuccess(recovered);
+        JsonObject recoveredData = recovered.json.getAsJsonObject("data");
+        assertThat(recoveredData.get("accountId").getAsString()).isEqualTo(accountId);
+        assertThat(recoveredData.get("phoneBound").getAsBoolean()).isTrue();
+        Response replayed = post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                "{}", anonymousToken, "disconnect-confirm");
+        assertThat(replayed.json).isEqualTo(recovered.json);
+
+        assertThat(count("SELECT COUNT(*) AS n FROM \"t_phone_credential\" WHERE \"accountId\"=?", account))
+                .isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) AS n FROM \"t_auth_session\" WHERE \"accountId\"=? "
+                + "AND \"kind\"='bound' AND \"status\"='active'", account)).isEqualTo(1);
+        assertError(post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                        "{}", anonymousToken, "disconnect-confirm-different"),
+                409, ApiException.RULE_FORBIDDEN, "resolution_used");
+    }
+
+    @Test
     void retiredEntryPointsAlwaysReturnTheSameGoneEnvelope() throws Exception {
         Response issued = post("/auth/device/session",
                 "{\"bootstrapNonce\":\"legacy-http-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
@@ -246,6 +289,35 @@ class PhoneAuthHttpGatewayTest {
     private static long count(String sql, long accountId) throws Exception {
         return ((Number) db.query(sql, statement -> statement.setLong(1, accountId))
                 .getFirst().get("n")).longValue();
+    }
+
+    private void sendCompleteRequestAndDisconnect(String path, String bearer, String idempotencyKey)
+            throws Exception {
+        byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
+        String request = "POST " + HttpGateway.BASE_PATH + path + " HTTP/1.1\r\n"
+                + "Host: 127.0.0.1:" + gateway.localPort() + "\r\n"
+                + "Authorization: Bearer " + bearer + "\r\n"
+                + "Idempotency-Key: " + idempotencyKey + "\r\n"
+                + "Content-Type: application/json\r\n"
+                + "Content-Length: " + body.length + "\r\n"
+                + "Connection: close\r\n\r\n";
+        try (Socket socket = new Socket("127.0.0.1", gateway.localPort())) {
+            socket.getOutputStream().write(request.getBytes(StandardCharsets.US_ASCII));
+            socket.getOutputStream().write(body);
+            socket.getOutputStream().flush();
+            socket.shutdownOutput();
+        }
+    }
+
+    private static void awaitCount(String sql, long accountId, long expected) throws Exception {
+        long deadline = System.nanoTime() + 2_000_000_000L;
+        long actual;
+        do {
+            actual = count(sql, accountId);
+            if (actual == expected) return;
+            Thread.sleep(10);
+        } while (System.nanoTime() < deadline);
+        assertThat(actual).isEqualTo(expected);
     }
 
     private static void assertSuccess(Response response) {
