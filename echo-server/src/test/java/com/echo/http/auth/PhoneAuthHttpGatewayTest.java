@@ -144,6 +144,75 @@ class PhoneAuthHttpGatewayTest {
     }
 
     @Test
+    void switchExistingKeepsTheAnonymousAccountAndIssuesControlledRecovery() throws Exception {
+        Response targetDevice = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"switch-target-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "switch-target-device");
+        JsonObject targetDeviceData = targetDevice.json.getAsJsonObject("data");
+        String targetAnonymousToken = targetDeviceData.get("sessionToken").getAsString();
+        Response targetChallenge = post("/auth/phone/challenges", phoneBody(PHONE),
+                targetAnonymousToken, "switch-target-challenge");
+        String targetChallengeId = targetChallenge.json.getAsJsonObject("data").get("challengeId").getAsString();
+        Response targetVerified = post("/auth/phone/challenges/" + targetChallengeId + "/verify",
+                "{\"code\":\"" + sms.codeFor(PHONE) + "\"}", targetAnonymousToken, "switch-target-verify");
+        String targetResolution = targetVerified.json.getAsJsonObject("data")
+                .get("resolutionToken").getAsString();
+        Response targetConfirmed = post("/auth/phone/resolutions/" + targetResolution + "/confirm",
+                "{}", targetAnonymousToken, "switch-target-confirm");
+        JsonObject targetAccount = targetConfirmed.json.getAsJsonObject("data");
+        String targetAccountId = targetAccount.get("accountId").getAsString();
+        String firstTargetBoundToken = targetAccount.get("sessionToken").getAsString();
+
+        Response sourceDevice = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"switch-source-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "switch-source-device");
+        JsonObject sourceDeviceData = sourceDevice.json.getAsJsonObject("data");
+        String sourceAccountId = sourceDeviceData.get("accountId").getAsString();
+        String sourceToken = sourceDeviceData.get("sessionToken").getAsString();
+        Response sourceChallenge = post("/auth/phone/challenges", phoneBody(PHONE),
+                sourceToken, "switch-source-challenge");
+        String sourceChallengeId = sourceChallenge.json.getAsJsonObject("data").get("challengeId").getAsString();
+        Response sourceVerified = post("/auth/phone/challenges/" + sourceChallengeId + "/verify",
+                "{\"code\":\"" + sms.codeFor(PHONE) + "\"}", sourceToken, "switch-source-verify");
+        JsonObject resolution = sourceVerified.json.getAsJsonObject("data");
+        assertThat(resolution.get("resolution").getAsString()).isEqualTo("switch_existing");
+
+        Response switched = post("/auth/phone/resolutions/" + resolution.get("resolutionToken").getAsString()
+                + "/confirm", "{}", sourceToken, "switch-source-confirm");
+        assertSuccess(switched);
+        JsonObject switchedData = switched.json.getAsJsonObject("data");
+        assertThat(switchedData.get("accountId").getAsString()).isEqualTo(targetAccountId);
+        assertThat(switchedData.get("phoneBound").getAsBoolean()).isTrue();
+        assertThat(switchedData.get("sessionToken").getAsString()).isNotEqualTo(firstTargetBoundToken);
+        assertThat(switchedData.get("previousAnonymousCredentialDisposition").getAsString())
+                .isEqualTo("retained_as_recovery");
+        assertThat(switchedData.get("deviceCredential").isJsonNull()).isTrue();
+        JsonObject recovery = switchedData.getAsJsonObject("anonymousRecovery");
+        assertThat(recovery).isNotNull();
+        String recoveryCredential = recovery.get("recoveryCredential").getAsString();
+        assertThat(recoveryCredential).isNotBlank();
+
+        assertError(post("/auth/phone/challenges", phoneBody("+8613800000398"),
+                        sourceToken, "switch-old-bearer"),
+                401, ApiException.UNAUTHORIZED, "invalid token");
+        String newTargetToken = switchedData.get("sessionToken").getAsString();
+        assertError(post("/auth/phone/challenges", phoneBody("+8613800000399"),
+                        newTargetToken, "switch-new-bearer"),
+                409, ApiException.RULE_FORBIDDEN, "resolution_session_mismatch");
+        assertError(post("/auth/device/session",
+                        "{\"deviceCredential\":\"" + recoveryCredential + "\"}",
+                        null, "switch-recovery-generic"),
+                409, ApiException.RULE_FORBIDDEN, "device_credential_recovery_required");
+
+        long sourceId = Long.parseLong(sourceAccountId);
+        assertThat(count("SELECT COUNT(*) AS n FROM \"t_account\" a JOIN \"t_account_profile\" p "
+                + "ON p.\"accountId\"=a.\"id\" WHERE a.\"id\"=? AND p.\"guest\"=1", sourceId))
+                .isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) AS n FROM \"t_phone_credential\" WHERE \"accountId\"=?", sourceId))
+                .isZero();
+    }
+
+    @Test
     void retiredEntryPointsAlwaysReturnTheSameGoneEnvelope() throws Exception {
         Response issued = post("/auth/device/session",
                 "{\"bootstrapNonce\":\"legacy-http-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
@@ -167,6 +236,16 @@ class PhoneAuthHttpGatewayTest {
         HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
         return new Response(response.statusCode(), response.headers().firstValue("Content-Type").orElse(""),
                 JsonParser.parseString(response.body()).getAsJsonObject());
+    }
+
+    private static String phoneBody(String phone) {
+        return "{\"phone\":\"" + phone
+                + "\",\"purpose\":\"login_or_bind\",\"continuation\":{\"intent\":\"none\"}}";
+    }
+
+    private static long count(String sql, long accountId) throws Exception {
+        return ((Number) db.query(sql, statement -> statement.setLong(1, accountId))
+                .getFirst().get("n")).longValue();
     }
 
     private static void assertSuccess(Response response) {
