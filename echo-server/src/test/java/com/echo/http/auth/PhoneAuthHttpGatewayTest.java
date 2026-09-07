@@ -1,0 +1,191 @@
+package com.echo.http.auth;
+
+import com.aengine.util.id.IDGenerator;
+import com.echo.http.ApiException;
+import com.echo.http.EchoApi;
+import com.echo.http.HttpGateway;
+import com.echo.http.Router;
+import com.echo.http.store.InMemoryEchoStore;
+import com.echo.infra.corpus.InMemoryTrainingCorpus;
+import com.echo.infra.llm.MockLlmClient;
+import com.echo.infra.persistence.PgDb;
+import com.echo.infra.vision.StubVisionClient;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Properties;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+/** Phone account resolution through the real JDK HTTP server and socket boundary. */
+class PhoneAuthHttpGatewayTest {
+    private static final String PHONE = "+8613800000301";
+    private static PgDb db;
+
+    private StubSmsProvider sms;
+    private HttpGateway gateway;
+    private HttpClient client;
+    private String baseUrl;
+
+    @BeforeAll
+    static void connect() {
+        String url = System.getenv("ECHO_TEST_PG_URL");
+        assumeTrue(url != null && !url.isBlank(), "设置 ECHO_TEST_PG_URL 后运行真实 Auth HTTP/PG 测试");
+        Properties properties = new Properties();
+        properties.setProperty("db.name", "echo");
+        properties.setProperty("jdbcUrl", url);
+        properties.setProperty("driverClassName", "org.postgresql.Driver");
+        properties.setProperty("username", System.getenv().getOrDefault("ECHO_TEST_PG_USER", "echo"));
+        String password = System.getenv("ECHO_TEST_PG_PASSWORD");
+        if (password != null) properties.setProperty("password", password);
+        properties.setProperty("maximumPoolSize", "6");
+        db = new PgDb(properties);
+    }
+
+    @AfterAll
+    static void closeDb() {
+        if (db != null) db.shutdown();
+    }
+
+    @BeforeEach
+    void startGateway() throws Exception {
+        for (String table : new String[]{"t_auth_idempotency", "t_auth_rate_event", "t_auth_audit",
+                "t_phone_resolution", "t_phone_challenge", "t_phone_credential", "t_auth_session",
+                "t_device_credential", "t_account_profile", "t_account"}) {
+            db.update("DELETE FROM \"" + table + "\"");
+        }
+        sms = new StubSmsProvider();
+        PgAuthService auth = new PgAuthService(db, new IDGenerator(58),
+                "test-http-auth-secret-that-is-longer-than-32-characters", sms,
+                ContinuationPolicy.noneOnly(),
+                Clock.fixed(Instant.parse("2026-09-07T02:30:00Z"), ZoneOffset.UTC));
+        InMemoryEchoStore store = new InMemoryEchoStore();
+        EchoApi api = new EchoApi(store, new IDGenerator(59), new MockLlmClient(),
+                new StubVisionClient(), null, new InMemoryTrainingCorpus());
+        Router router = api.routes(false);
+        new AuthApi(auth).register(router);
+        gateway = new HttpGateway(0, router, store, null, null, null, null, auth);
+        gateway.start();
+        client = HttpClient.newHttpClient();
+        baseUrl = "http://127.0.0.1:" + gateway.localPort() + HttpGateway.BASE_PATH;
+    }
+
+    @AfterEach
+    void stopGateway() {
+        if (gateway != null) gateway.stop();
+    }
+
+    @Test
+    void phoneMainlineAndIdempotencyCrossTheRealGateway() throws Exception {
+        String nonce = "http-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz";
+        Response issued = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"" + nonce + "\"}", null, "device-fixed");
+        assertSuccess(issued);
+        JsonObject issuedData = issued.json.getAsJsonObject("data");
+        String anonymousToken = issuedData.get("sessionToken").getAsString();
+        String deviceCredential = issuedData.get("deviceCredential").getAsString();
+
+        String restoreBody = "{\"deviceCredential\":\"" + deviceCredential + "\"}";
+        Response restored = post("/auth/device/session", restoreBody, null, "device-restore-fixed");
+        assertSuccess(restored);
+        Response deviceReplay = post("/auth/device/session", restoreBody, null, "device-restore-fixed");
+        assertThat(deviceReplay.status).isEqualTo(200);
+        assertThat(deviceReplay.json).isEqualTo(restored.json);
+        assertError(post("/auth/device/session",
+                        "{\"deviceCredential\":\"" + deviceCredential + "\","
+                                + "\"bootstrapNonce\":\"http-bootstrap-nonce-different-abcdefghijklmnopqrstuvwxyz\"}",
+                        null, "device-restore-fixed"),
+                409, ApiException.RULE_FORBIDDEN, "device_session_idempotency_conflict");
+
+        String challengeBody = """
+                {"phone":"+8613800000301","purpose":"login_or_bind","continuation":{"intent":"none"}}
+                """;
+        assertError(post("/auth/phone/challenges", challengeBody, null, "challenge-fixed"),
+                401, ApiException.UNAUTHORIZED, "missing bearer token");
+        assertError(post("/auth/phone/challenges", challengeBody, "not-a-session", "challenge-fixed"),
+                401, ApiException.UNAUTHORIZED, "invalid token");
+
+        Response challenged = post("/auth/phone/challenges", challengeBody, anonymousToken, "challenge-fixed");
+        assertSuccess(challenged);
+        Response challengeReplay = post("/auth/phone/challenges", challengeBody, anonymousToken, "challenge-fixed");
+        assertThat(challengeReplay.json).isEqualTo(challenged.json);
+        assertError(post("/auth/phone/challenges",
+                        challengeBody.replace(PHONE, "+8613800000302"), anonymousToken, "challenge-fixed"),
+                409, ApiException.RULE_FORBIDDEN, "idempotency_conflict");
+
+        String challengeId = challenged.json.getAsJsonObject("data").get("challengeId").getAsString();
+        Response verified = post("/auth/phone/challenges/" + challengeId + "/verify",
+                "{\"code\":\"" + sms.codeFor(PHONE) + "\"}", anonymousToken, "verify-fixed");
+        assertSuccess(verified);
+        assertThat(verified.json.getAsJsonObject("data").get("resolution").getAsString())
+                .isEqualTo("bind_current");
+        String resolutionToken = verified.json.getAsJsonObject("data").get("resolutionToken").getAsString();
+
+        Response confirmed = post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                "{}", anonymousToken, "confirm-fixed");
+        assertSuccess(confirmed);
+        assertThat(confirmed.json.getAsJsonObject("data").get("phoneBound").getAsBoolean()).isTrue();
+        Response confirmReplay = post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                "{}", anonymousToken, "confirm-fixed");
+        assertThat(confirmReplay.json).isEqualTo(confirmed.json);
+    }
+
+    @Test
+    void retiredEntryPointsAlwaysReturnTheSameGoneEnvelope() throws Exception {
+        Response issued = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"legacy-http-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "legacy-device");
+        String bearer = issued.json.getAsJsonObject("data").get("sessionToken").getAsString();
+        for (String path : new String[]{"/auth/guest", "/auth/bind"}) {
+            Response withoutBearer = post(path, "{}", null, null);
+            Response withBearer = post(path, "{}", bearer, null);
+            assertError(withoutBearer, 410, ApiException.GONE, "endpoint_retired");
+            assertError(withBearer, 410, ApiException.GONE, "endpoint_retired");
+            assertThat(withBearer.json).isEqualTo(withoutBearer.json);
+        }
+    }
+
+    private Response post(String path, String body, String bearer, String idempotencyKey) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (bearer != null) request.header("Authorization", "Bearer " + bearer);
+        if (idempotencyKey != null) request.header("Idempotency-Key", idempotencyKey);
+        HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        return new Response(response.statusCode(), response.headers().firstValue("Content-Type").orElse(""),
+                JsonParser.parseString(response.body()).getAsJsonObject());
+    }
+
+    private static void assertSuccess(Response response) {
+        assertThat(response.status).isEqualTo(200);
+        assertThat(response.contentType).startsWith("application/json");
+        assertThat(response.json.get("code").getAsInt()).isZero();
+        assertThat(response.json.has("data")).isTrue();
+        assertThat(response.json.has("msg")).isFalse();
+        assertThat(response.json.has("detail")).isFalse();
+    }
+
+    private static void assertError(Response response, int status, int code, String detail) {
+        assertThat(response.status).isEqualTo(status);
+        assertThat(response.contentType).startsWith("application/json");
+        assertThat(response.json.get("code").getAsInt()).isEqualTo(code);
+        assertThat(response.json.get("msg").getAsString()).isNotBlank();
+        assertThat(response.json.get("detail").getAsString()).isEqualTo(detail);
+        assertThat(response.json.has("data")).isFalse();
+    }
+
+    private record Response(int status, String contentType, JsonObject json) { }
+}

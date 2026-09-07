@@ -103,6 +103,14 @@ public final class HttpGateway {
         }
     }
 
+    /** Actual bound port, including the OS-assigned port when constructed with {@code 0}. */
+    public int localPort() {
+        if (server == null) {
+            throw new IllegalStateException("HTTP gateway has not started");
+        }
+        return server.getAddress().getPort();
+    }
+
     private void dispatch(HttpExchange exchange) {
         String method = exchange.getRequestMethod();
         String rawPath = exchange.getRequestURI().getPath();
