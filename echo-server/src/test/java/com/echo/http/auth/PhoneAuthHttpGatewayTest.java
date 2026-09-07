@@ -335,6 +335,18 @@ class PhoneAuthHttpGatewayTest {
         }
     }
 
+    @Test
+    void matchedRouteTemplateNeverContainsTheResolutionCredential() {
+        Router router = new Router();
+        router.addPublic("POST", "/auth/phone/resolutions/:resolutionToken/confirm", context -> null);
+        String secret = "sensitive-resolution-token-that-must-not-be-logged";
+        Router.Match match = router.match("POST", "/auth/phone/resolutions/" + secret + "/confirm");
+        assertThat(match).isNotNull();
+        assertThat(match.routeTemplate())
+                .isEqualTo("/auth/phone/resolutions/:resolutionToken/confirm")
+                .doesNotContain(secret);
+    }
+
     private Response post(String path, String body, String bearer, String idempotencyKey) throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .header("Content-Type", "application/json")

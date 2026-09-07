@@ -115,6 +115,7 @@ public final class HttpGateway {
         String method = exchange.getRequestMethod();
         String rawPath = exchange.getRequestURI().getPath();
         String path = rawPath.startsWith(BASE_PATH) ? rawPath.substring(BASE_PATH.length()) : rawPath;
+        String logPath = path;
         if (path.isEmpty()) {
             path = "/";
         }
@@ -147,6 +148,9 @@ public final class HttpGateway {
                 }
                 return;
             }
+            // Dynamic segments may contain credentials (for example resolutionToken).
+            // Logs and metrics must use the registered template, never the request value.
+            logPath = match.routeTemplate();
 
             AuthPrincipal principal = null;
             if (!match.entry.isPublic) {
@@ -170,11 +174,11 @@ public final class HttpGateway {
                 writeOk(exchange, data);
             }
         } catch (ApiException e) {
-            log.debug("业务异常 code={}, path={}, detail={}", e.code(), path, e.detail());
+            log.debug("业务异常 code={}, path={}, detail={}", e.code(), logPath, e.detail());
             int http = httpStatusOf(e.code());
             writeError(exchange, http, e.code(), e.getMessage(), e.detail(), e.data());
         } catch (Exception e) {
-            log.error("网关处理异常 path={}", path, e);
+            log.error("网关处理异常 path={}", logPath, e);
             writeError(exchange, 500, ApiException.SERVER_ERROR,
                     "这里出了点小状况，待会儿再来看看它好吗？", e.getClass().getSimpleName());
         }
