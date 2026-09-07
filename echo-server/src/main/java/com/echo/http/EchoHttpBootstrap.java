@@ -38,7 +38,7 @@ import com.echo.http.onboarding.PgOnboardingRepository;
 import com.echo.http.auth.AuthApi;
 import com.echo.http.auth.PgAuthService;
 import com.echo.http.auth.SessionAuthenticator;
-import com.echo.http.auth.StubSmsProvider;
+import com.echo.http.auth.SmsProvider;
 import com.echo.http.auth.UnavailableSmsProvider;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
@@ -228,9 +228,8 @@ public final class EchoHttpBootstrap {
         SessionAuthenticator sessionAuthenticator = null;
         String authSecret = System.getenv("ECHO_AUTH_SECRET");
         if (persistent && authSecret != null && authSecret.length() >= 32) {
-            boolean useStubSms = devRoutes && "stub".equals(System.getProperty("echo.sms.provider"));
             PgAuthService auth = new PgAuthService(pgDb, idGenerator, authSecret,
-                    useStubSms ? new StubSmsProvider() : new UnavailableSmsProvider(),
+                    runtimeSmsProvider(),
                     (accountId, intent, resourceId, schemaVersion) -> {
                         if ("none".equals(intent)) return true;
                         var session = onboardingRepository.find(resourceId);
@@ -254,6 +253,15 @@ public final class EchoHttpBootstrap {
         }
         Runtime.getRuntime().addShutdownHook(new Thread(gateway::stop, "echo-http-shutdown"));
         return gateway;
+    }
+
+    /**
+     * Runtime assembly must never select the controllable test SMS provider, even if legacy
+     * development flags are accidentally present. Tests inject StubSmsProvider directly.
+     * Replace this fail-closed provider only when a production supplier adapter is configured.
+     */
+    static SmsProvider runtimeSmsProvider() {
+        return new UnavailableSmsProvider();
     }
 
     /**
