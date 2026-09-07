@@ -42,6 +42,11 @@ public final class Router {
         public Object handle(RequestContext context) throws Exception {
             return entry.route.handle(context);
         }
+
+        /** Whether the matched route intentionally bypasses bearer authentication. */
+        public boolean isPublic() {
+            return entry.isPublic;
+        }
     }
 
     private final List<Entry> entries = new ArrayList<>();

@@ -263,10 +263,16 @@ CREATE TABLE IF NOT EXISTS "t_auth_idempotency" (
     "requestHash" varchar(64) NOT NULL,
     "responseCipher" text,
     "status" varchar(16) NOT NULL DEFAULT 'processing',
+    "replayUntil" bigint NOT NULL,
+    "resultSessionId" varchar(64),
+    "resultDeviceCredentialId" varchar(64),
     "createdAt" bigint NOT NULL,
     "updatedAt" bigint NOT NULL,
     PRIMARY KEY ("operation", "actorScope", "idempotencyKey")
 );
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "replayUntil" bigint NOT NULL DEFAULT 0;
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "resultSessionId" varchar(64);
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "resultDeviceCredentialId" varchar(64);
 CREATE INDEX IF NOT EXISTS "t_auth_idempotency_idx_created" ON "t_auth_idempotency" ("createdAt");
 
 CREATE TABLE IF NOT EXISTS "t_auth_rate_event" (
@@ -1712,5 +1718,6 @@ VALUES (2026083101, 1788177600000),
        (2026083102, 1788181200000),
        (2026090301, 1788418800000),
        (2026090601, 1788678000000),
-       (2026090701, 1788764400000)
+       (2026090701, 1788764400000),
+       (2026090702, 1788768000000)
 ON CONFLICT ("version") DO NOTHING;

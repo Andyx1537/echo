@@ -27,23 +27,28 @@ public final class AuthApi {
     }
 
     private Object deviceSession(RequestContext ctx) {
+        onlyKeys(ctx.body(), "deviceCredential", "bootstrapNonce");
         return service.deviceSession(optional(ctx.body(), "deviceCredential"), optional(ctx.body(), "bootstrapNonce"),
                 ctx.header("Idempotency-Key"), ctx.clientIp());
     }
 
     private Object challenge(RequestContext ctx) {
+        onlyKeys(ctx.body(), "phone", "purpose", "continuation");
         JsonObject continuation = object(ctx.body(), "continuation");
+        onlyKeys(continuation, "intent", "resourceId", "schemaVersion");
         return service.createChallenge(ctx.principal(), required(ctx.body(), "phone"), required(ctx.body(), "purpose"),
                 required(continuation, "intent"), optional(continuation, "resourceId"),
                 optional(continuation, "schemaVersion"), ctx.header("Idempotency-Key"), ctx.clientIp());
     }
 
     private Object verify(RequestContext ctx) {
+        onlyKeys(ctx.body(), "code");
         return service.verify(ctx.principal(), ctx.path("challengeId"), required(ctx.body(), "code"),
                 ctx.header("Idempotency-Key"));
     }
 
     private Object confirm(RequestContext ctx) {
+        onlyKeys(ctx.body());
         String authorization = ctx.header("Authorization");
         String bearer = authorization != null && authorization.startsWith("Bearer ")
                 ? authorization.substring("Bearer ".length()).trim() : null;
@@ -64,5 +69,13 @@ public final class AuthApi {
 
     private static String optional(JsonObject body, String name) {
         return body.has(name) && !body.get(name).isJsonNull() ? body.get(name).getAsString() : null;
+    }
+
+    private static void onlyKeys(JsonObject body, String... allowed) {
+        java.util.Set<String> expected = java.util.Set.of(allowed);
+        if (!expected.containsAll(body.keySet())) {
+            throw new ApiException(ApiException.BAD_PARAM, "请求里包含不能识别的信息，请返回后重试。",
+                    "continuation_invalid");
+        }
     }
 }

@@ -73,7 +73,7 @@ public final class PgAuthService implements SessionAuthenticator {
         String actor = crypto.hash("device-actor", credential == null ? bootstrapNonce : credential);
         String requestHash = crypto.hash("request", String.valueOf(credential) + "|" + bootstrapNonce);
         try {
-            return db.inTransaction(c -> {
+            Map<String, Object> result = db.inTransaction(c -> {
                 lock(c, "device-session:" + actor + ":" + idempotencyKey);
                 Map<String, Object> replay = replay(c, "device_session", actor, idempotencyKey, requestHash,
                         "device_session_idempotency_conflict");
@@ -107,10 +107,12 @@ public final class PgAuthService implements SessionAuthenticator {
                         "accountId", String.valueOf(accountId), "phoneBound", false,
                         "sessionToken", issued.rawToken, "deviceCredential", rawCredential,
                         "deviceCredentialAction", action);
-                remember(c, "device_session", actor, idempotencyKey, requestHash, response);
+                remember(c, "device_session", actor, idempotencyKey, requestHash, response,
+                        now() + RESOLUTION_TTL, issued.id, credentialId);
                 audit(c, "device_session_" + action, accountId, issued.id, actor, null);
                 return response;
             });
+            return raiseDeferred(result);
         } catch (ApiException e) {
             throw e;
         } catch (SQLException e) {
@@ -130,7 +132,7 @@ public final class PgAuthService implements SessionAuthenticator {
         String requestHash = crypto.hash("request", normalized + "|" + purpose + "|" + intent + "|"
                 + resourceId + "|" + schemaVersion);
         try {
-            return db.inTransaction(c -> {
+            Map<String, Object> result = db.inTransaction(c -> {
                 lock(c, "phone-challenge:" + phoneHash);
                 Map<String, Object> replay = replay(c, "phone_challenge", String.valueOf(principal.accountId()),
                         idempotencyKey, requestHash, "idempotency_conflict");
@@ -186,10 +188,11 @@ public final class PgAuthService implements SessionAuthenticator {
                 Map<String, Object> response = map("challengeId", challengeId, "expiresAt", expires,
                         "resendAvailableAt", resend);
                 remember(c, "phone_challenge", String.valueOf(principal.accountId()), idempotencyKey,
-                        requestHash, response);
+                        requestHash, response, expires, null, null);
                 audit(c, "phone_challenge_created", principal.accountId(), principal.sessionId(), phoneHash, intent);
                 return response;
             });
+            return raiseDeferred(result);
         } catch (ApiException e) {
             throw e;
         } catch (SQLException e) {
@@ -203,7 +206,7 @@ public final class PgAuthService implements SessionAuthenticator {
         requireIdempotency(idempotencyKey, false);
         String requestHash = crypto.hash("request", challengeId + "|" + code);
         try {
-            return db.inTransaction(c -> {
+            Map<String, Object> result = db.inTransaction(c -> {
                 lock(c, "phone-verify:" + challengeId);
                 Map<String, Object> replay = replay(c, "phone_verify", String.valueOf(principal.accountId()),
                         idempotencyKey, requestHash, "idempotency_conflict");
@@ -217,7 +220,7 @@ public final class PgAuthService implements SessionAuthenticator {
                 if ("locked".equals(challenge.status)) throw conflict("challenge_locked", "验证码尝试次数已用完，请重新发送。", null);
                 if (!"created".equals(challenge.status) || now >= challenge.expiresAt) {
                     expireChallenge(c, challengeId);
-                    throw conflict("challenge_expired", "这次验证码已经失效，请重新发送。", null);
+                    return deferred("challenge_expired", "这次验证码已经失效，请重新发送。", null);
                 }
                 if (!crypto.hash("code:" + challengeId, code == null ? "" : code).equals(challenge.codeHash)) {
                     int attempts = challenge.attempts + 1;
@@ -228,8 +231,9 @@ public final class PgAuthService implements SessionAuthenticator {
                         ps.setString(3, challengeId);
                         ps.executeUpdate();
                     }
-                    if (attempts >= 5) throw conflict("challenge_locked", "验证码尝试次数已用完，请重新发送。", null);
-                    throw bad("code_invalid", "验证码不正确，请再试一次。", Map.of("remainingAttempts", 5 - attempts));
+                    if (attempts >= 5) return deferred("challenge_locked", "验证码尝试次数已用完，请重新发送。", null);
+                    return deferred("code_invalid", "验证码不正确，请再试一次。",
+                            Map.of("remainingAttempts", 5 - attempts));
                 }
                 Long target = phoneOwner(c, challenge.phoneHash, false);
                 String resolution = target == null ? "bind_current" : "switch_existing";
@@ -264,10 +268,12 @@ public final class PgAuthService implements SessionAuthenticator {
                 }
                 Map<String, Object> response = map("resolution", resolution, "resolutionToken", rawToken,
                         "resolutionExpiresAt", expires);
-                remember(c, "phone_verify", String.valueOf(principal.accountId()), idempotencyKey, requestHash, response);
+                remember(c, "phone_verify", String.valueOf(principal.accountId()), idempotencyKey, requestHash,
+                        response, expires, null, null);
                 audit(c, "phone_challenge_verified", principal.accountId(), principal.sessionId(), challenge.phoneHash, resolution);
                 return response;
             });
+            return raiseDeferred(result);
         } catch (ApiException e) {
             throw e;
         } catch (SQLException e) {
@@ -286,7 +292,7 @@ public final class PgAuthService implements SessionAuthenticator {
         String presentedSessionHash = crypto.hash("session", bearerToken == null ? "" : bearerToken);
         String requestHash = crypto.hash("request", resolutionToken);
         try {
-            return db.inTransaction(c -> {
+            Map<String, Object> result = db.inTransaction(c -> {
                 Resolution r = resolution(c, crypto.hash("resolution", resolutionToken), true);
                 if (r == null) throw conflict("resolution_expired", "这次登录确认已经失效，请重新验证。", null);
                 SessionRow source = session(c, r.sourceSessionId, true);
@@ -310,6 +316,8 @@ public final class PgAuthService implements SessionAuthenticator {
                     throw conflict("phone_ownership_changed", "手机号归属刚刚发生变化，请重新验证。", null);
                 }
                 Map<String, Object> response;
+                Session issued;
+                String resultDeviceCredentialId = null;
                 if ("bind_current".equals(r.resolution)) {
                     try (PreparedStatement ps = c.prepareStatement(
                             "INSERT INTO \"t_phone_credential\"(\"phoneHash\",\"phoneCipher\",\"accountId\",\"createdAt\") VALUES(?,?,?,?)")) {
@@ -322,7 +330,7 @@ public final class PgAuthService implements SessionAuthenticator {
                     setBound(c, r.sourceAccountId);
                     revokeAccountAnonymousSessions(c, r.sourceAccountId, "bound");
                     revokeAccountDevices(c, r.sourceAccountId, "bound");
-                    Session issued = insertSession(c, r.sourceAccountId, "bound", null);
+                    issued = insertSession(c, r.sourceAccountId, "bound", null);
                     ContinuationResult continuation = continuation(r.sourceAccountId, r, true);
                     response = map("accountId", String.valueOf(r.sourceAccountId), "phoneBound", true,
                             "sessionToken", issued.rawToken, "deviceCredential", null,
@@ -333,8 +341,9 @@ public final class PgAuthService implements SessionAuthenticator {
                     revokeSession(c, r.sourceSessionId, "switched_account");
                     if (source.deviceCredentialId != null) revokeDevice(c, source.deviceCredentialId, "switched_account");
                     String recoveryRaw = AuthCrypto.token(32);
-                    insertDevice(c, id(), recoveryRaw, r.sourceAccountId, "recovery_only", null);
-                    Session issued = insertSession(c, r.targetAccountId, "bound", null);
+                    resultDeviceCredentialId = id();
+                    insertDevice(c, resultDeviceCredentialId, recoveryRaw, r.sourceAccountId, "recovery_only", null);
+                    issued = insertSession(c, r.targetAccountId, "bound", null);
                     response = map("accountId", String.valueOf(r.targetAccountId), "phoneBound", true,
                             "sessionToken", issued.rawToken, "deviceCredential", null,
                             "returnToAllowed", false, "nextAction",
@@ -350,9 +359,11 @@ public final class PgAuthService implements SessionAuthenticator {
                     ps.setString(2, r.id);
                     ps.executeUpdate();
                 }
-                remember(c, "phone_confirm", String.valueOf(r.sourceAccountId), idempotencyKey, requestHash, response);
+                remember(c, "phone_confirm", String.valueOf(r.sourceAccountId), idempotencyKey, requestHash,
+                        response, r.expiresAt, issued.id, resultDeviceCredentialId);
                 return response;
             });
+            return raiseDeferred(result);
         } catch (ApiException e) {
             throw e;
         } catch (SQLException e) {
@@ -372,7 +383,7 @@ public final class PgAuthService implements SessionAuthenticator {
     }
 
     private void validateContinuation(long accountId, String intent, String resourceId, String schemaVersion) {
-        if ("none".equals(intent) && resourceId == null) return;
+        if ("none".equals(intent) && resourceId == null && schemaVersion == null) return;
         if (!"private_onboarding_generation".equals(intent) || resourceId == null
                 || !"v1".equals(schemaVersion)
                 || !continuations.canResume(accountId, intent, resourceId, schemaVersion)) {
@@ -430,12 +441,27 @@ public final class PgAuthService implements SessionAuthenticator {
     private Map<String, Object> replay(Connection c, String operation, String actor, String key,
                                        String hash, String conflictDetail) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT \"requestHash\",\"responseCipher\",\"status\" FROM \"t_auth_idempotency\" "
+                "SELECT \"requestHash\",\"responseCipher\",\"status\",\"replayUntil\" FROM \"t_auth_idempotency\" "
                         + "WHERE \"operation\"=? AND \"actorScope\"=? AND \"idempotencyKey\"=?")) {
             ps.setString(1, operation); ps.setString(2, actor); ps.setString(3, key);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 if (!hash.equals(rs.getString(1))) throw conflict(conflictDetail, "这次提交与已处理的内容不一致。", null);
+                if (now() >= rs.getLong(4)) {
+                    try (PreparedStatement clear = c.prepareStatement(
+                            "UPDATE \"t_auth_idempotency\" SET \"responseCipher\"=NULL,\"status\"='expired',"
+                                    + "\"updatedAt\"=? WHERE \"operation\"=? AND \"actorScope\"=? AND \"idempotencyKey\"=?")) {
+                        clear.setLong(1, now()); clear.setString(2, operation); clear.setString(3, actor); clear.setString(4, key);
+                        clear.executeUpdate();
+                    }
+                    String expiredDetail = switch (operation) {
+                        case "phone_challenge" -> "challenge_expired";
+                        case "phone_verify" -> "resolution_expired";
+                        case "phone_confirm" -> "resolution_used";
+                        default -> "device_session_idempotency_conflict";
+                    };
+                    return deferred(expiredDetail, "这次操作的安全恢复窗口已经结束，请重新开始。", null);
+                }
                 if (!"completed".equals(rs.getString(3)) || rs.getString(2) == null) {
                     throw conflict(conflictDetail, "这次操作仍在处理中，请稍后重试。", null);
                 }
@@ -446,13 +472,17 @@ public final class PgAuthService implements SessionAuthenticator {
     }
 
     private void remember(Connection c, String operation, String actor, String key,
-                          String hash, Map<String, Object> response) throws SQLException {
+                          String hash, Map<String, Object> response, long replayUntil,
+                          String resultSessionId, String resultDeviceCredentialId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO \"t_auth_idempotency\"(\"operation\",\"actorScope\",\"idempotencyKey\","
-                        + "\"requestHash\",\"responseCipher\",\"status\",\"createdAt\",\"updatedAt\") "
-                        + "VALUES(?,?,?,?,?,'completed',?,?)")) {
+                        + "\"requestHash\",\"responseCipher\",\"status\",\"replayUntil\","
+                        + "\"resultSessionId\",\"resultDeviceCredentialId\",\"createdAt\",\"updatedAt\") "
+                        + "VALUES(?,?,?,?,?,'completed',?,?,?,?,?)")) {
             ps.setString(1, operation); ps.setString(2, actor); ps.setString(3, key); ps.setString(4, hash);
-            ps.setString(5, crypto.encrypt(GSON.toJson(response))); ps.setLong(6, now()); ps.setLong(7, now());
+            ps.setString(5, crypto.encrypt(GSON.toJson(response))); ps.setLong(6, replayUntil);
+            nullable(ps, 7, resultSessionId); nullable(ps, 8, resultDeviceCredentialId);
+            ps.setLong(9, now()); ps.setLong(10, now());
             ps.executeUpdate();
         }
     }
@@ -581,6 +611,7 @@ public final class PgAuthService implements SessionAuthenticator {
                         + "WHERE \"accountId\"=? AND \"kind\"='anonymous' AND \"status\"='active'")) {
             ps.setLong(1, now()); ps.setLong(2, accountId); ps.executeUpdate();
         }
+        clearCredentialReplayForAccount(c, "resultSessionId", "t_auth_session", "sessionId", accountId);
     }
 
     private void revokeAccountDevices(Connection c, long accountId, String reason) throws SQLException {
@@ -589,6 +620,7 @@ public final class PgAuthService implements SessionAuthenticator {
                         + "WHERE \"accountId\"=? AND \"status\"='login_active'")) {
             ps.setString(1, reason); ps.setLong(2, now()); ps.setLong(3, accountId); ps.executeUpdate();
         }
+        clearCredentialReplayForAccount(c, "resultDeviceCredentialId", "t_device_credential", "credentialId", accountId);
     }
 
     private void revokeSession(Connection c, String id, String reason) throws SQLException {
@@ -596,12 +628,32 @@ public final class PgAuthService implements SessionAuthenticator {
                 "UPDATE \"t_auth_session\" SET \"status\"='revoked',\"revokedAt\"=? WHERE \"sessionId\"=?")) {
             ps.setLong(1, now()); ps.setString(2, id); ps.executeUpdate();
         }
+        clearCredentialReplay(c, "resultSessionId", id);
     }
 
     private void revokeDevice(Connection c, String id, String reason) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "UPDATE \"t_device_credential\" SET \"status\"='revoked',\"revocationReason\"=?,\"updatedAt\"=? WHERE \"credentialId\"=?")) {
             ps.setString(1, reason); ps.setLong(2, now()); ps.setString(3, id); ps.executeUpdate();
+        }
+        clearCredentialReplay(c, "resultDeviceCredentialId", id);
+    }
+
+    private void clearCredentialReplay(Connection c, String referenceColumn, String id) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE \"t_auth_idempotency\" SET \"responseCipher\"=NULL,\"status\"='revoked',"
+                        + "\"updatedAt\"=? WHERE \"" + referenceColumn + "\"=? AND \"responseCipher\" IS NOT NULL")) {
+            ps.setLong(1, now()); ps.setString(2, id); ps.executeUpdate();
+        }
+    }
+
+    private void clearCredentialReplayForAccount(Connection c, String referenceColumn, String table,
+                                                   String idColumn, long accountId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "UPDATE \"t_auth_idempotency\" SET \"responseCipher\"=NULL,\"status\"='revoked',"
+                        + "\"updatedAt\"=? WHERE \"" + referenceColumn + "\" IN (SELECT \"" + idColumn
+                        + "\" FROM \"" + table + "\" WHERE \"accountId\"=?) AND \"responseCipher\" IS NOT NULL")) {
+            ps.setLong(1, now()); ps.setLong(2, accountId); ps.executeUpdate();
         }
     }
 
@@ -641,6 +693,19 @@ public final class PgAuthService implements SessionAuthenticator {
         Map<String, Object> result = Json.map();
         for (int i = 0; i < values.length; i += 2) result.put((String) values[i], values[i + 1]);
         return result;
+    }
+
+    private static Map<String, Object> deferred(String detail, String message, Map<String, Object> data) {
+        return map("__authError", detail, "__authMessage", message, "__authData", data);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> raiseDeferred(Map<String, Object> result) {
+        String detail = (String) result.get("__authError");
+        if (detail == null) return result;
+        Map<String, Object> data = (Map<String, Object>) result.get("__authData");
+        if ("code_invalid".equals(detail)) throw bad(detail, (String) result.get("__authMessage"), data);
+        throw conflict(detail, (String) result.get("__authMessage"), data);
     }
 
     private static ApiException bad(String detail, String message, Map<String, Object> data) {

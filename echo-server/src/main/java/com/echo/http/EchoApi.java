@@ -205,7 +205,7 @@ public class EchoApi {
         Route retiredAuth = ctx -> { throw new ApiException(ApiException.GONE,
                 "登录方式已经更新，请使用手机号登录。", "endpoint_retired"); };
         r.addPublic("POST", "/auth/guest", retiredAuth);
-        r.add("POST", "/auth/bind", retiredAuth);
+        r.addPublic("POST", "/auth/bind", retiredAuth);
         r.add("GET", "/me", this::me);
         // §2 建档
         if (Boolean.parseBoolean(System.getProperty("echo.onboarding.legacy.enabled", "true"))) {

@@ -26,6 +26,7 @@ class RetiredAuthApiTest {
         Router router = api.routes(false);
         for (String path : new String[]{"/auth/guest", "/auth/bind"}) {
             Router.Match match = router.match("POST", path);
+            assertThat(match.isPublic()).isTrue();
             RequestContext ctx = new RequestContext("POST", match.pathParams, Map.of(), new JsonObject(), 1L);
             assertThatThrownBy(() -> match.handle(ctx)).isInstanceOf(ApiException.class)
                     .satisfies(e -> {
