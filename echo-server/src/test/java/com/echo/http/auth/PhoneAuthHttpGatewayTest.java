@@ -69,6 +69,10 @@ class PhoneAuthHttpGatewayTest {
                 "t_device_credential", "t_account_profile", "t_account"}) {
             db.update("DELETE FROM \"" + table + "\"");
         }
+        startGatewayInstance();
+    }
+
+    private void startGatewayInstance() throws Exception {
         sms = new StubSmsProvider();
         PgAuthService auth = new PgAuthService(db, new IDGenerator(58),
                 "test-http-auth-secret-that-is-longer-than-32-characters", sms,
@@ -256,6 +260,67 @@ class PhoneAuthHttpGatewayTest {
     }
 
     @Test
+    void historicalCredentialsRemainUsableAfterServiceAndGatewayRestart() throws Exception {
+        Response anonymous = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"historic-anonymous-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "historic-anonymous-device");
+        JsonObject anonymousData = anonymous.json.getAsJsonObject("data");
+        long anonymousAccountId = anonymousData.get("accountId").getAsLong();
+        String anonymousToken = anonymousData.get("sessionToken").getAsString();
+        String anonymousDeviceCredential = anonymousData.get("deviceCredential").getAsString();
+
+        Response binding = post("/auth/device/session",
+                "{\"bootstrapNonce\":\"historic-binding-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
+                null, "historic-binding-device");
+        JsonObject bindingData = binding.json.getAsJsonObject("data");
+        long boundAccountId = bindingData.get("accountId").getAsLong();
+        String bindingAnonymousToken = bindingData.get("sessionToken").getAsString();
+        String revokedAfterBindCredential = bindingData.get("deviceCredential").getAsString();
+        String historicPhone = "+8613800000320";
+        Response challenged = post("/auth/phone/challenges", phoneBody(historicPhone),
+                bindingAnonymousToken, "historic-bind-challenge");
+        String challengeId = challenged.json.getAsJsonObject("data").get("challengeId").getAsString();
+        Response verified = post("/auth/phone/challenges/" + challengeId + "/verify",
+                "{\"code\":\"" + sms.codeFor(historicPhone) + "\"}", bindingAnonymousToken,
+                "historic-bind-verify");
+        String resolutionToken = verified.json.getAsJsonObject("data").get("resolutionToken").getAsString();
+        Response confirmed = post("/auth/phone/resolutions/" + resolutionToken + "/confirm",
+                "{}", bindingAnonymousToken, "historic-bind-confirm");
+        String boundToken = confirmed.json.getAsJsonObject("data").get("sessionToken").getAsString();
+
+        long threeYearsAgo = Instant.parse("2023-09-07T00:00:00Z").toEpochMilli();
+        ageAccount(anonymousAccountId, threeYearsAgo);
+        ageAccount(boundAccountId, threeYearsAgo);
+
+        gateway.stop();
+        gateway = null;
+        startGatewayInstance();
+
+        Response anonymousStillAuthenticated = post("/auth/phone/challenges",
+                phoneBody("+8613800000321"), anonymousToken, "historic-anonymous-challenge");
+        assertSuccess(anonymousStillAuthenticated);
+
+        Response restored = post("/auth/device/session",
+                "{\"deviceCredential\":\"" + anonymousDeviceCredential + "\"}",
+                null, "historic-anonymous-restore");
+        assertSuccess(restored);
+        assertThat(restored.json.getAsJsonObject("data").get("accountId").getAsLong())
+                .isEqualTo(anonymousAccountId);
+
+        assertError(post("/auth/phone/challenges", phoneBody("+8613800000322"),
+                        boundToken, "historic-bound-session"),
+                409, ApiException.RULE_FORBIDDEN, "resolution_session_mismatch");
+
+        Response rotated = post("/auth/device/session",
+                "{\"deviceCredential\":\"" + revokedAfterBindCredential + "\"}",
+                null, "historic-revoked-device");
+        assertSuccess(rotated);
+        JsonObject rotatedData = rotated.json.getAsJsonObject("data");
+        assertThat(rotatedData.get("deviceCredentialAction").getAsString()).isEqualTo("rotated_after_bind");
+        assertThat(rotatedData.get("accountId").getAsLong()).isNotEqualTo(boundAccountId);
+    }
+
+    @Test
     void retiredEntryPointsAlwaysReturnTheSameGoneEnvelope() throws Exception {
         Response issued = post("/auth/device/session",
                 "{\"bootstrapNonce\":\"legacy-http-bootstrap-nonce-abcdefghijklmnopqrstuvwxyz\"}",
@@ -289,6 +354,27 @@ class PhoneAuthHttpGatewayTest {
     private static long count(String sql, long accountId) throws Exception {
         return ((Number) db.query(sql, statement -> statement.setLong(1, accountId))
                 .getFirst().get("n")).longValue();
+    }
+
+    private static void ageAccount(long accountId, long timestamp) throws Exception {
+        db.update("UPDATE \"t_account\" SET \"createTime\"=? WHERE \"id\"=?", statement -> {
+            statement.setLong(1, timestamp);
+            statement.setLong(2, accountId);
+        });
+        db.update("UPDATE \"t_account_profile\" SET \"createTime\"=? WHERE \"accountId\"=?", statement -> {
+            statement.setLong(1, timestamp);
+            statement.setLong(2, accountId);
+        });
+        db.update("UPDATE \"t_auth_session\" SET \"createdAt\"=? WHERE \"accountId\"=?", statement -> {
+            statement.setLong(1, timestamp);
+            statement.setLong(2, accountId);
+        });
+        db.update("UPDATE \"t_device_credential\" SET \"createdAt\"=?,\"updatedAt\"=? "
+                + "WHERE \"accountId\"=?", statement -> {
+            statement.setLong(1, timestamp);
+            statement.setLong(2, timestamp);
+            statement.setLong(3, accountId);
+        });
     }
 
     private void sendCompleteRequestAndDisconnect(String path, String bearer, String idempotencyKey)
