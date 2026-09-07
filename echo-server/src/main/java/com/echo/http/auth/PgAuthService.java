@@ -231,9 +231,15 @@ public final class PgAuthService implements SessionAuthenticator {
                         ps.setString(3, challengeId);
                         ps.executeUpdate();
                     }
-                    if (attempts >= 5) return deferred("challenge_locked", "验证码尝试次数已用完，请重新发送。", null);
-                    return deferred("code_invalid", "验证码不正确，请再试一次。",
-                            Map.of("remainingAttempts", 5 - attempts));
+                    Map<String, Object> failure = attempts >= 5
+                            ? deferred("challenge_locked", "验证码尝试次数已用完，请重新发送。", null)
+                            : deferred("code_invalid", "验证码不正确，请再试一次。",
+                                    Map.of("remainingAttempts", 5 - attempts));
+                    // 错码会消耗挑战次数，因此失败结果本身也必须进入幂等记录。
+                    // 网络重试使用同一 key 时只重放原失败，不能再次扣减 attemptCount。
+                    remember(c, "phone_verify", String.valueOf(principal.accountId()), idempotencyKey,
+                            requestHash, failure, challenge.expiresAt, null, null);
+                    return failure;
                 }
                 Long target = phoneOwner(c, challenge.phoneHash, false);
                 String resolution = target == null ? "bind_current" : "switch_existing";

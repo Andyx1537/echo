@@ -224,6 +224,26 @@ class PgAuthServiceTest {
     }
 
     @Test
+    void wrongCodeReplayWithSameKeyConsumesOnlyOneAttempt() {
+        SessionFixture fixture = anonymous("wrong-code-idempotency", "192.0.2.30");
+        Map<String, Object> challenge = challenge(fixture.principal, "+8613800000030",
+                "challenge-wrong-idempotency");
+        String challengeId = (String) challenge.get("challengeId");
+
+        assertCodeInvalidRemaining(() -> auth.verify(fixture.principal, challengeId, "000000",
+                "wrong-idempotency-key"), 4);
+        assertCodeInvalidRemaining(() -> auth.verify(fixture.principal, challengeId, "000000",
+                "wrong-idempotency-key"), 4);
+        assertThat(count("SELECT \"attemptCount\" AS n FROM \"t_phone_challenge\" WHERE \"challengeId\"='"
+                + challengeId + "'")).isEqualTo(1);
+
+        assertDetail(() -> auth.verify(fixture.principal, challengeId, "111111",
+                "wrong-idempotency-key"), "idempotency_conflict");
+        assertThat(count("SELECT \"attemptCount\" AS n FROM \"t_phone_challenge\" WHERE \"challengeId\"='"
+                + challengeId + "'")).isEqualTo(1);
+    }
+
+    @Test
     void resendCooldownSupersedesOldOnlyAfterProviderSuccess() {
         SessionFixture fixture = anonymous("resend", "192.0.2.4");
         String phone = "+8613800000013";
@@ -399,6 +419,17 @@ class PgAuthServiceTest {
     private static void assertDetail(org.assertj.core.api.ThrowableAssert.ThrowingCallable call, String detail) {
         assertThatThrownBy(call).isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).detail()).isEqualTo(detail));
+    }
+
+    private static void assertCodeInvalidRemaining(org.assertj.core.api.ThrowableAssert.ThrowingCallable call,
+                                                   int remainingAttempts) {
+        assertThatThrownBy(call).isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    ApiException api = (ApiException) e;
+                    assertThat(api.detail()).isEqualTo("code_invalid");
+                    assertThat(((Number) api.data().get("remainingAttempts")).intValue())
+                            .isEqualTo(remainingAttempts);
+                });
     }
 
     private static String nonce(String suffix) {
