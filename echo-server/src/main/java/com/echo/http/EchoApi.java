@@ -202,8 +202,10 @@ public class EchoApi {
     public Router routes(boolean devRoutes) {
         Router r = new Router();
         // §1 鉴权/账号
-        r.addPublic("POST", "/auth/guest", this::authGuest);
-        r.add("POST", "/auth/bind", this::authBind);
+        Route retiredAuth = ctx -> { throw new ApiException(ApiException.GONE,
+                "登录方式已经更新，请使用手机号登录。", "endpoint_retired"); };
+        r.addPublic("POST", "/auth/guest", retiredAuth);
+        r.add("POST", "/auth/bind", retiredAuth);
         r.add("GET", "/me", this::me);
         // §2 建档
         if (Boolean.parseBoolean(System.getProperty("echo.onboarding.legacy.enabled", "true"))) {

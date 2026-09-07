@@ -1,6 +1,8 @@
 package com.echo.http;
 
 import com.echo.http.onboarding.OnboardingApi;
+import com.echo.http.auth.AuthPrincipal;
+import com.echo.http.auth.SessionAuthenticator;
 
 import com.echo.infra.storage.IStorage;
 import com.echo.infra.storage.LocalDiskStorage;
@@ -50,12 +52,20 @@ public final class HttpGateway {
     private final com.echo.http.work.ResourceStore resources;
     private final com.echo.http.onboarding.OnboardingApi onboarding;
     private final ExecutorService executor;
+    private final SessionAuthenticator sessions;
     private HttpServer server;
 
     public HttpGateway(int port, Router router, com.echo.http.store.EchoStore store,
                        IStorage storage, com.echo.http.work.ResourceStore resources,
                        ExecutorService executor,
                        com.echo.http.onboarding.OnboardingApi onboarding) {
+        this(port, router, store, storage, resources, executor, onboarding, null);
+    }
+
+    public HttpGateway(int port, Router router, com.echo.http.store.EchoStore store,
+                       IStorage storage, com.echo.http.work.ResourceStore resources,
+                       ExecutorService executor, com.echo.http.onboarding.OnboardingApi onboarding,
+                       SessionAuthenticator sessions) {
         this.port = port;
         this.router = router;
         this.store = store;
@@ -63,6 +73,7 @@ public final class HttpGateway {
         this.resources = resources;
         this.executor = executor;
         this.onboarding = onboarding;
+        this.sessions = sessions;
     }
 
     public void start() throws IOException {
@@ -129,9 +140,9 @@ public final class HttpGateway {
                 return;
             }
 
-            long accountId = 0L;
+            AuthPrincipal principal = null;
             if (!match.entry.isPublic) {
-                accountId = authenticate(exchange);
+                principal = authenticate(exchange);
             }
 
             Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
@@ -140,7 +151,9 @@ public final class HttpGateway {
             exchange.getRequestHeaders().forEach((name, values) -> {
                 if (!values.isEmpty()) headers.put(name.toLowerCase(java.util.Locale.ROOT), values.get(0));
             });
-            RequestContext ctx = new RequestContext(method, match.pathParams, query, body, accountId, headers);
+            String clientIp = exchange.getRemoteAddress() == null ? "unknown"
+                    : exchange.getRemoteAddress().getAddress().getHostAddress();
+            RequestContext ctx = new RequestContext(method, match.pathParams, query, body, principal, headers, clientIp);
 
             Object data = match.entry.route.handle(ctx);
             if (data instanceof HttpResult result) {
@@ -170,7 +183,7 @@ public final class HttpGateway {
      * 任何按路由表做的审查扫到。{@code S1′} 点名的「上传素材」就落在这里，别处没有第二个上传口。</p>
      */
     private void handleUpload(HttpExchange exchange) throws IOException {
-        long accountId = authenticate(exchange);
+        long accountId = authenticate(exchange).accountId();
         if (!BindingGuard.isBound(store, accountId)) {
             writeError(exchange, 403, ApiException.BINDING_REQUIRED, BindingGuard.COPY_DEFAULT,
                     BindingGuard.detail(store, accountId, "upload"));
@@ -225,7 +238,7 @@ public final class HttpGateway {
             writeError(exchange, 503, ApiException.SERVER_ERROR, "建档上传暂时不可用。", "onboarding_unavailable");
             return;
         }
-        long accountId = authenticate(exchange);
+        long accountId = authenticate(exchange).accountId();
         byte[] body = exchange.getRequestBody().readNBytes(MAX_UPLOAD_BYTES + 1);
         if (body.length > MAX_UPLOAD_BYTES) {
             writeError(exchange, 413, ApiException.BAD_PARAM, "这份素材有点大，换一份小一些的试试。", "asset_upload_incomplete");
@@ -297,7 +310,7 @@ public final class HttpGateway {
             writeError(exchange, 503, ApiException.SERVER_ERROR, "建档素材暂时不可用。", "onboarding_unavailable");
             return;
         }
-        long accountId = authenticate(exchange);
+        long accountId = authenticate(exchange).accountId();
         String[] parts = path.split("/");
         String resourceId = onboarding.ownedAssetResource(accountId, parts[3], parts[5]);
         IStorage.Loaded loaded = storage.loadByResourceId(resourceId);
@@ -346,17 +359,23 @@ public final class HttpGateway {
     }
 
     /** 解析 Bearer token → accountId；缺失/无效抛 1001。 */
-    private long authenticate(HttpExchange exchange) {
+    private AuthPrincipal authenticate(HttpExchange exchange) {
         String auth = exchange.getRequestHeaders().getFirst("Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) {
             throw new ApiException(ApiException.UNAUTHORIZED, "先在门口取一张通行证吧（游客也可以）。", "missing bearer token");
         }
         String token = auth.substring("Bearer ".length()).trim();
-        Long accountId = store.resolveToken(token);
-        if (accountId == null) {
+        AuthPrincipal principal;
+        if (sessions != null) {
+            principal = sessions.authenticate(token);
+        } else {
+            Long accountId = store.resolveToken(token);
+            principal = accountId == null ? null : new AuthPrincipal(accountId, null, "legacy", null);
+        }
+        if (principal == null) {
             throw new ApiException(ApiException.UNAUTHORIZED, "通行证过期了，重新取一张就好。", "invalid token");
         }
-        return accountId;
+        return principal;
     }
 
     private static int httpStatusOf(int code) {

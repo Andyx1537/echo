@@ -1,0 +1,68 @@
+package com.echo.http.auth;
+
+import com.echo.http.ApiException;
+import com.echo.http.RequestContext;
+import com.echo.http.Router;
+import com.google.gson.JsonObject;
+
+/** HTTP adapter for phone-account-resolution-v1. */
+public final class AuthApi {
+    private final PgAuthService service;
+    public AuthApi(PgAuthService service) { this.service = service; }
+
+    public void register(Router router) {
+        router.addPublic("POST", "/auth/device/session", this::deviceSession);
+        router.add("POST", "/auth/phone/challenges", this::challenge);
+        router.add("POST", "/auth/phone/challenges/:challengeId/verify", this::verify);
+        router.addPublic("POST", "/auth/phone/resolutions/:resolutionToken/confirm", this::confirm);
+    }
+
+    public static void registerUnavailable(Router router) {
+        com.echo.http.Route unavailable = ctx -> { throw new ApiException(ApiException.SERVER_ERROR,
+                "身份服务暂时不可用，请稍后再试。", "auth_persistence_unavailable"); };
+        router.addPublic("POST", "/auth/device/session", unavailable);
+        router.add("POST", "/auth/phone/challenges", unavailable);
+        router.add("POST", "/auth/phone/challenges/:challengeId/verify", unavailable);
+        router.addPublic("POST", "/auth/phone/resolutions/:resolutionToken/confirm", unavailable);
+    }
+
+    private Object deviceSession(RequestContext ctx) {
+        return service.deviceSession(optional(ctx.body(), "deviceCredential"), optional(ctx.body(), "bootstrapNonce"),
+                ctx.header("Idempotency-Key"), ctx.clientIp());
+    }
+
+    private Object challenge(RequestContext ctx) {
+        JsonObject continuation = object(ctx.body(), "continuation");
+        return service.createChallenge(ctx.principal(), required(ctx.body(), "phone"), required(ctx.body(), "purpose"),
+                required(continuation, "intent"), optional(continuation, "resourceId"),
+                optional(continuation, "schemaVersion"), ctx.header("Idempotency-Key"), ctx.clientIp());
+    }
+
+    private Object verify(RequestContext ctx) {
+        return service.verify(ctx.principal(), ctx.path("challengeId"), required(ctx.body(), "code"),
+                ctx.header("Idempotency-Key"));
+    }
+
+    private Object confirm(RequestContext ctx) {
+        String authorization = ctx.header("Authorization");
+        String bearer = authorization != null && authorization.startsWith("Bearer ")
+                ? authorization.substring("Bearer ".length()).trim() : null;
+        return service.confirm(bearer, ctx.path("resolutionToken"), ctx.header("Idempotency-Key"));
+    }
+
+    private static JsonObject object(JsonObject body, String name) {
+        if (body.has(name) && body.get(name).isJsonObject()) return body.getAsJsonObject(name);
+        throw new ApiException(ApiException.BAD_PARAM, "请求信息不完整，请检查后再试。", "continuation_invalid");
+    }
+
+    private static String required(JsonObject body, String name) {
+        String value = optional(body, name);
+        if (value == null || value.isBlank()) throw new ApiException(ApiException.BAD_PARAM,
+                "请求信息不完整，请检查后再试。", "missing " + name);
+        return value;
+    }
+
+    private static String optional(JsonObject body, String name) {
+        return body.has(name) && !body.get(name).isJsonNull() ? body.get(name).getAsString() : null;
+    }
+}

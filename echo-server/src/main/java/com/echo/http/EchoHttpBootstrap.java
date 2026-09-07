@@ -35,6 +35,11 @@ import com.echo.http.onboarding.InMemoryOnboardingRepository;
 import com.echo.http.onboarding.OnboardingApi;
 import com.echo.http.onboarding.OnboardingRepository;
 import com.echo.http.onboarding.PgOnboardingRepository;
+import com.echo.http.auth.AuthApi;
+import com.echo.http.auth.PgAuthService;
+import com.echo.http.auth.SessionAuthenticator;
+import com.echo.http.auth.StubSmsProvider;
+import com.echo.http.auth.UnavailableSmsProvider;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
 import com.echo.infra.llm.ILlmClient;
@@ -56,6 +61,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.time.Clock;
 
 /**
  * HTTP/JSON 网关的装配与启动（独立于 WebSocket 9001）。
@@ -219,7 +225,27 @@ public final class EchoHttpBootstrap {
                 idGenerator);
         onboarding.register(router);
 
-        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor, onboarding);
+        SessionAuthenticator sessionAuthenticator = null;
+        String authSecret = System.getenv("ECHO_AUTH_SECRET");
+        if (persistent && authSecret != null && authSecret.length() >= 32) {
+            boolean useStubSms = devRoutes && "stub".equals(System.getProperty("echo.sms.provider"));
+            PgAuthService auth = new PgAuthService(pgDb, idGenerator, authSecret,
+                    useStubSms ? new StubSmsProvider() : new UnavailableSmsProvider(),
+                    (accountId, intent, resourceId, schemaVersion) -> {
+                        if ("none".equals(intent)) return true;
+                        var session = onboardingRepository.find(resourceId);
+                        return session != null && session.accountId == accountId
+                                && "ready_to_bind".equals(session.status);
+                    }, Clock.systemUTC());
+            new AuthApi(auth).register(router);
+            sessionAuthenticator = auth;
+        } else {
+            AuthApi.registerUnavailable(router);
+            log.warn("持久身份服务未装配：需要 PostgreSQL 与至少 32 字符的 ECHO_AUTH_SECRET");
+        }
+
+        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor, onboarding,
+                sessionAuthenticator);
         try {
             gateway.start();
         } catch (Exception e) {
