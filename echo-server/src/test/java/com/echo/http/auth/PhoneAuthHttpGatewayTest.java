@@ -73,9 +73,13 @@ class PhoneAuthHttpGatewayTest {
     }
 
     private void startGatewayInstance() throws Exception {
+        startGatewayInstance(false);
+    }
+
+    private void startGatewayInstance(boolean fixedCode) throws Exception {
         sms = new StubSmsProvider();
         PgAuthService auth = new PgAuthService(db, new IDGenerator(58),
-                "test-http-auth-secret-that-is-longer-than-32-characters", sms,
+                "test-http-auth-secret-that-is-longer-than-32-characters", fixedCode ? new DevelopmentSmsProvider() : sms,
                 ContinuationPolicy.noneOnly(),
                 Clock.fixed(Instant.parse("2026-09-07T02:30:00Z"), ZoneOffset.UTC));
         InMemoryEchoStore store = new InMemoryEchoStore();
@@ -92,6 +96,34 @@ class PhoneAuthHttpGatewayTest {
     @AfterEach
     void stopGateway() {
         if (gateway != null) gateway.stop();
+    }
+
+    @Test
+    void fixedFourDigitCodeBindsAndSwitchesThroughHttp() throws Exception {
+        gateway.stop();
+        startGatewayInstance(true);
+        String owner = null;
+        for (int i = 0; i < 2; i++) {
+            Response device = post("/auth/device/session",
+                    "{\"bootstrapNonce\":\"fixed-code-bootstrap-abcdefghijklmnopqrstuvwxyz-" + i + "\"}", null, "fixed-device-" + i);
+            assertSuccess(device);
+            JsonObject issued = device.json.getAsJsonObject("data");
+            String token = issued.get("sessionToken").getAsString();
+            Response challenge = post("/auth/phone/challenges", phoneBody("+8600000000000"), token, "fixed-challenge-" + i);
+            assertSuccess(challenge);
+            String id = challenge.json.getAsJsonObject("data").get("challengeId").getAsString();
+            Response wrong = post("/auth/phone/challenges/" + id + "/verify", "{\"code\":\"1111\"}", token, "fixed-wrong-" + i);
+            assertThat(wrong.json.get("detail").getAsString()).isEqualTo("code_invalid");
+            Response verified = post("/auth/phone/challenges/" + id + "/verify", "{\"code\":\"9999\"}", token, "fixed-verify-" + i);
+            assertSuccess(verified);
+            JsonObject resolution = verified.json.getAsJsonObject("data");
+            assertThat(resolution.get("resolution").getAsString()).isEqualTo(i == 0 ? "bind_current" : "switch_existing");
+            Response confirmed = post("/auth/phone/resolutions/" + resolution.get("resolutionToken").getAsString() + "/confirm", "{}", token, "fixed-confirm-" + i);
+            assertSuccess(confirmed);
+            String account = confirmed.json.getAsJsonObject("data").get("accountId").getAsString();
+            if (i == 0) owner = account;
+            assertThat(account).isEqualTo(owner);
+        }
     }
 
     @Test

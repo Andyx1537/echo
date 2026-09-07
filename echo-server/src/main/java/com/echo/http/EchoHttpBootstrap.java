@@ -256,11 +256,13 @@ public final class EchoHttpBootstrap {
     }
 
     /**
-     * Runtime assembly must never select the controllable test SMS provider, even if legacy
-     * development flags are accidentally present. Tests inject StubSmsProvider directly.
-     * Replace this fail-closed provider only when a production supplier adapter is configured.
+     * Fixed-code integration requires an explicit auth mode. Legacy dev flags do not enable it.
+     * The default remains unavailable until the production supplier is configured.
      */
     static SmsProvider runtimeSmsProvider() {
+        if ("development-fixed-code".equals(System.getProperty("echo.auth.mode"))) {
+            return new com.echo.http.auth.DevelopmentSmsProvider();
+        }
         return new UnavailableSmsProvider();
     }
 

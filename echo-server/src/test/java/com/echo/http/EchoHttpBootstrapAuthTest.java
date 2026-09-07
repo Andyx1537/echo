@@ -12,6 +12,16 @@ class EchoHttpBootstrapAuthTest {
     void clearLegacyFlags() {
         System.clearProperty("echo.devRoutes");
         System.clearProperty("echo.sms.provider");
+        System.clearProperty("echo.auth.mode");
+    }
+
+    @Test
+    void explicitDevelopmentModeUsesFourDigitCodeWithoutSms() throws Exception {
+        System.setProperty("echo.auth.mode", "development-fixed-code");
+        SmsProvider provider = EchoHttpBootstrap.runtimeSmsProvider();
+        assertThat(provider.createCode()).isEqualTo("9999");
+        provider.send("+8600000000000", "9999", "dev-request");
+        assertThat(provider.controllableStub()).isTrue();
     }
 
     @Test

@@ -148,7 +148,7 @@ public final class PgAuthService implements SessionAuthenticator {
                         ? principal.sessionId() : principal.deviceCredentialId();
                 rate(c, "device", crypto.hash("device-rate", deviceDimension), 10, 30);
                 rate(c, "ip", crypto.hash("ip", safeIp(clientIp)), 20, 100);
-                String code = AuthCrypto.digits(6);
+                String code = sms.createCode();
                 String challengeId = id();
                 try {
                     sms.send(normalized, code, challengeId);
