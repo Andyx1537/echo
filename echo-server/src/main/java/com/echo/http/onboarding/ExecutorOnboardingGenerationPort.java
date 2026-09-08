@@ -29,7 +29,8 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
                 String raw = llm.complete("private-pet-onboarding\n" + anchor.answerSnapshot
                         + "\nadjustment=" + (adjustmentCode == null ? "" : adjustmentCode));
                 List<OnboardingAggregate.Candidate> out = new ArrayList<>();
-                String[] gradients = {"sunset", "meadow", "ocean"};
+                String[] gradients = {"linear-gradient(145deg,#efc4a8,#f5e6ca)",
+                        "linear-gradient(145deg,#b8cdb2,#e9eed7)", "linear-gradient(145deg,#a9c9da,#e1edf2)"};
                 String[] emojis = {"🐾", "🌤️", "✨"};
                 for (int i = 0; i < 3; i++) {
                     OnboardingAggregate.Candidate c = new OnboardingAggregate.Candidate();

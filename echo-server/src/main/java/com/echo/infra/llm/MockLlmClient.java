@@ -21,6 +21,9 @@ public class MockLlmClient implements ILlmClient {
      */
     @Override
     public String complete(String prompt) {
+        if (prompt != null && prompt.startsWith("private-pet-onboarding\n")) {
+            return "开发流程预览：从熟悉的日常，慢慢认出它（真实画面生成尚未接入）";
+        }
         log.debug("MockLlmClient.complete 返回固定评审 JSON, promptLen={}", prompt == null ? 0 : prompt.length());
         return "{\"scores\":{\"emotionalSafety\":4,\"authenticity\":4,\"monotony\":1,"
                 + "\"surprise\":3,\"griefIntensity\":2,\"intrusion\":0,\"personaFit\":4},"
