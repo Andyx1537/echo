@@ -266,6 +266,35 @@ class OnboardingApiTest {
     }
 
     @Test
+    void switchedAccountCannotReadOrInheritAnonymousOnboarding() throws Exception {
+        String anonymousDraft = readyToBind();
+        assertThat(repository.find(anonymousDraft).petName).isEqualTo("它");
+
+        long existingAccount = ids.nextId();
+        AccountProfile existing = new AccountProfile();
+        existing.accountId = existingAccount;
+        existing.deviceId = "existing-device";
+        existing.guest = false;
+        accounts.putProfile(existing);
+
+        assertThatThrownBy(() -> callAs(existingAccount, "GET", "/pet/onboarding/" + anonymousDraft,
+                new JsonObject(), null))
+                .isInstanceOfSatisfying(ApiException.class, e ->
+                        assertThat(e.detail()).isEqualTo("onboarding_forbidden"));
+
+        Map<String, Object> fresh = callAs(existingAccount, "POST", "/pet/onboarding",
+                body("petName", "新的开始"), "create-after-switch");
+        assertThat(fresh.get("onboardingId")).isNotEqualTo(anonymousDraft);
+        assertThat(fresh.get("petName")).isEqualTo("新的开始");
+        OnboardingAggregate leftover = repository.find(anonymousDraft);
+        assertThat(leftover.accountId).isEqualTo(accountId);
+        assertThat(leftover.assets).isNotEmpty();
+        assertThat(leftover.answers).isNotEmpty();
+        assertThat(repository.find((String) fresh.get("onboardingId")).assets).isEmpty();
+        assertThat(repository.find((String) fresh.get("onboardingId")).answers).isEmpty();
+    }
+
+    @Test
     void legacyRoutesCanReturnEndpointRetired() throws Exception {
         String before = System.getProperty("echo.onboarding.legacy.enabled");
         try {
@@ -352,11 +381,17 @@ class OnboardingApiTest {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> call(String method, String path, JsonObject body, String key) throws Exception {
+        return callAs(accountId, method, path, body, key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> callAs(long actor, String method, String path, JsonObject body, String key)
+            throws Exception {
         Router.Match match = router.match(method, path);
         assertThat(match).isNotNull();
         Map<String, String> headers = key == null ? Map.of() : Map.of("idempotency-key", key);
         Object result = match.handle(new RequestContext(method, match.pathParams,
-                Map.of(), body, accountId, headers));
+                Map.of(), body, actor, headers));
         if (result instanceof HttpResult http) result = http.data();
         return (Map<String, Object>) result;
     }

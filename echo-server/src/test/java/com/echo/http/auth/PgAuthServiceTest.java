@@ -170,6 +170,41 @@ class PgAuthServiceTest {
     }
 
     @Test
+    void switchWithOnboardingContinuationDoesNotResumeAnonymousDraft() {
+        String phone = "+8613800000099";
+        Map<String, Object> target = bindNewPhone(phone, "owner");
+        long ownerId = Long.parseLong((String) target.get("accountId"));
+
+        Map<String, Object> source = auth.deviceSession(null, nonce("anon-ob"), "issue-anon-ob", "10.4.0.1");
+        String sourceToken = (String) source.get("sessionToken");
+        AuthPrincipal sourcePrincipal = auth.authenticate(sourceToken);
+        long sourceId = sourcePrincipal.accountId();
+        String draftId = "ob-" + sourceId;
+        auth = new PgAuthService(db, new IDGenerator(61),
+                "test-auth-secret-that-is-longer-than-32-characters",
+                sms, (accountId, intent, resourceId, schemaVersion) ->
+                "none".equals(intent)
+                        || ("private_onboarding_generation".equals(intent)
+                        && "v1".equals(schemaVersion)
+                        && draftId.equals(resourceId)
+                        && accountId == sourceId), clock);
+
+        Map<String, Object> challenge = auth.createChallenge(sourcePrincipal, phone, "login_or_bind",
+                "private_onboarding_generation", draftId, "v1", "challenge-anon-ob", "10.4.0.1");
+        Map<String, Object> verified = auth.verify(sourcePrincipal, (String) challenge.get("challengeId"),
+                sms.codeFor(phone), "verify-anon-ob");
+        assertThat(verified.get("resolution")).isEqualTo("switch_existing");
+
+        Map<String, Object> confirmed = auth.confirm(sourceToken, (String) verified.get("resolutionToken"),
+                "confirm-anon-ob");
+        assertThat(confirmed.get("accountId")).isEqualTo(String.valueOf(ownerId));
+        assertThat(confirmed.get("returnToAllowed")).isEqualTo(false);
+        assertThat(confirmed.get("nextAction")).isEqualTo("restart_in_existing_account");
+        assertThat(confirmed.get("previousAnonymousCredentialDisposition")).isEqualTo("retained_as_recovery");
+        assertThat(auth.authenticate(sourceToken)).isNull();
+    }
+
+    @Test
     void rejectsInvalidE164AndInvalidContinuation() {
         SessionFixture fixture = anonymous("validation", "192.0.2.1");
         assertDetail(() -> auth.createChallenge(fixture.principal, "13800000000", "login_or_bind",
