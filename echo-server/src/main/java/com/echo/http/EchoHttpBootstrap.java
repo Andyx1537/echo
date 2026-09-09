@@ -29,6 +29,17 @@ import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
 import com.echo.http.work.WorkStore;
+import com.echo.http.onboarding.EchoOnboardingWindowPort;
+import com.echo.http.onboarding.ExecutorOnboardingGenerationPort;
+import com.echo.http.onboarding.InMemoryOnboardingRepository;
+import com.echo.http.onboarding.OnboardingApi;
+import com.echo.http.onboarding.OnboardingRepository;
+import com.echo.http.onboarding.PgOnboardingRepository;
+import com.echo.http.auth.AuthApi;
+import com.echo.http.auth.PgAuthService;
+import com.echo.http.auth.SessionAuthenticator;
+import com.echo.http.auth.SmsProvider;
+import com.echo.http.auth.UnavailableSmsProvider;
 import com.echo.infra.corpus.ITrainingCorpus;
 import com.echo.infra.corpus.InMemoryTrainingCorpus;
 import com.echo.infra.llm.ILlmClient;
@@ -50,6 +61,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.time.Clock;
 
 /**
  * HTTP/JSON 网关的装配与启动（独立于 WebSocket 9001）。
@@ -201,7 +213,38 @@ public final class EchoHttpBootstrap {
                 new LinkedBlockingQueue<>(256),
                 new NamedThreadFactory("echo-http"));
 
-        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor);
+        OnboardingRepository onboardingRepository = persistent
+                ? new PgOnboardingRepository(pgDb)
+                : new InMemoryOnboardingRepository();
+        OnboardingApi onboarding = new OnboardingApi(
+                onboardingRepository,
+                accountId -> BindingGuard.isBound(store, accountId),
+                new ExecutorOnboardingGenerationPort(effectiveLlm, idGenerator, executor),
+                new EchoOnboardingWindowPort(store, idGenerator),
+                vision,
+                idGenerator);
+        onboarding.register(router);
+
+        SessionAuthenticator sessionAuthenticator = null;
+        String authSecret = System.getenv("ECHO_AUTH_SECRET");
+        if (persistent && authSecret != null && authSecret.length() >= 32) {
+            PgAuthService auth = new PgAuthService(pgDb, idGenerator, authSecret,
+                    runtimeSmsProvider(),
+                    (accountId, intent, resourceId, schemaVersion) -> {
+                        if ("none".equals(intent)) return true;
+                        var session = onboardingRepository.find(resourceId);
+                        return session != null && session.accountId == accountId
+                                && "ready_to_bind".equals(session.status);
+                    }, Clock.systemUTC());
+            new AuthApi(auth).register(router);
+            sessionAuthenticator = auth;
+        } else {
+            AuthApi.registerUnavailable(router);
+            log.warn("持久身份服务未装配：需要 PostgreSQL 与至少 32 字符的 ECHO_AUTH_SECRET");
+        }
+
+        HttpGateway gateway = new HttpGateway(port, router, store, storage, resourceStore, executor, onboarding,
+                sessionAuthenticator);
         try {
             gateway.start();
         } catch (Exception e) {
@@ -210,6 +253,17 @@ public final class EchoHttpBootstrap {
         }
         Runtime.getRuntime().addShutdownHook(new Thread(gateway::stop, "echo-http-shutdown"));
         return gateway;
+    }
+
+    /**
+     * Fixed-code integration requires an explicit auth mode. Legacy dev flags do not enable it.
+     * The default remains unavailable until the production supplier is configured.
+     */
+    static SmsProvider runtimeSmsProvider() {
+        if ("development-fixed-code".equals(System.getProperty("echo.auth.mode"))) {
+            return new com.echo.http.auth.DevelopmentSmsProvider();
+        }
+        return new UnavailableSmsProvider();
     }
 
     /**

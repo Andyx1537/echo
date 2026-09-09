@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 
 /**
  * 素材归属（{@code t_resource}）。无 DB 时退化为内存态，语义一致。
@@ -32,6 +33,7 @@ public final class ResourceStore {
 
     /** 内存态兜底：resourceId -> 归属账号。仅在 {@code db == null} 时使用。 */
     private final Map<String, Long> memoryOwner = new ConcurrentHashMap<>();
+    private final Set<String> memoryCleanupQueue = ConcurrentHashMap.newKeySet();
     private final PgDb db;
 
     public ResourceStore(PgDb db) {
@@ -49,22 +51,35 @@ public final class ResourceStore {
             return false;
         }
         if (!persistent()) {
-            memoryOwner.put(resourceId, ownerId);
-            return true;
+            Long existing = memoryOwner.putIfAbsent(resourceId, ownerId);
+            boolean accepted = existing == null || existing == ownerId;
+            if (accepted) memoryCleanupQueue.remove(resourceId);
+            return accepted;
         }
         String sql = "INSERT INTO \"t_resource\"(\"resourceId\",\"ownerId\",\"storageKey\","
                 + "\"contentType\",\"bytes\",\"createdAt\") VALUES(?,?,?,?,?,?) "
-                + "ON CONFLICT (\"resourceId\") DO NOTHING";
-        try (Connection c = db.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, resourceId);
-            ps.setLong(2, ownerId);
-            ps.setString(3, storageKey == null ? "" : storageKey);
-            ps.setString(4, contentType == null ? "" : contentType);
-            ps.setLong(5, bytes);
-            ps.setLong(6, now);
-            ps.executeUpdate();
-            return true;
+                + "ON CONFLICT (\"resourceId\") DO UPDATE SET "
+                + "\"storageKey\"=EXCLUDED.\"storageKey\",\"contentType\"=EXCLUDED.\"contentType\","
+                + "\"bytes\"=EXCLUDED.\"bytes\",\"revokedAt\"=NULL "
+                + "WHERE \"t_resource\".\"ownerId\"=EXCLUDED.\"ownerId\"";
+        try {
+            return db.inTransaction(c -> {
+                try (PreparedStatement ps = c.prepareStatement(sql)) {
+                    ps.setString(1, resourceId);
+                    ps.setLong(2, ownerId);
+                    ps.setString(3, storageKey == null ? "" : storageKey);
+                    ps.setString(4, contentType == null ? "" : contentType);
+                    ps.setLong(5, bytes);
+                    ps.setLong(6, now);
+                    if (ps.executeUpdate() != 1) return false;
+                }
+                try (PreparedStatement clear = c.prepareStatement(
+                        "DELETE FROM \"t_resource_cleanup_queue\" WHERE \"resourceId\"=?")) {
+                    clear.setString(1, resourceId);
+                    clear.executeUpdate();
+                }
+                return true;
+            });
         } catch (SQLException e) {
             log.error("[resource] 记归属失败 resourceId={}, ownerId={}", resourceId, ownerId, e);
             return false;
@@ -98,6 +113,54 @@ public final class ResourceStore {
         } catch (SQLException e) {
             // 🔴 查询异常也判不通过。可用性让位于「不把别人的素材发出去」。
             log.error("[resource] 查归属失败 resourceId={}, accountId={}", resourceId, accountId, e);
+            return false;
+        }
+    }
+
+    /** Fail closed after a multipart object was stored but could not be attached to its business owner. */
+    public boolean revoke(String resourceId, long accountId, long now) {
+        if (resourceId == null || resourceId.isEmpty() || accountId <= 0) return false;
+        if (!persistent()) {
+            boolean removed = memoryOwner.remove(resourceId, accountId);
+            if (removed) memoryCleanupQueue.add(resourceId);
+            return removed;
+        }
+        try {
+            return db.inTransaction(c -> {
+                try (PreparedStatement revoke = c.prepareStatement(
+                        "UPDATE \"t_resource\" SET \"revokedAt\"=? "
+                                + "WHERE \"resourceId\"=? AND \"ownerId\"=?")) {
+                    revoke.setLong(1, now);
+                    revoke.setString(2, resourceId);
+                    revoke.setLong(3, accountId);
+                    if (revoke.executeUpdate() != 1) return false;
+                }
+                try (PreparedStatement queue = c.prepareStatement(
+                        "INSERT INTO \"t_resource_cleanup_queue\"(\"resourceId\",\"reason\",\"status\",\"queuedAt\") "
+                                + "VALUES(?,'onboarding_attach_failed','pending',?) ON CONFLICT (\"resourceId\") "
+                                + "DO UPDATE SET \"reason\"=EXCLUDED.\"reason\",\"status\"='pending',"
+                                + "\"queuedAt\"=EXCLUDED.\"queuedAt\"")) {
+                    queue.setString(1, resourceId);
+                    queue.setLong(2, now);
+                    queue.executeUpdate();
+                }
+                return true;
+            });
+        } catch (SQLException e) {
+            log.error("[resource] 撤销孤立素材失败 resourceId={}, ownerId={}", resourceId, accountId, e);
+            return false;
+        }
+    }
+
+    boolean cleanupQueued(String resourceId) {
+        if (!persistent()) return memoryCleanupQueue.contains(resourceId);
+        String sql = "SELECT 1 FROM \"t_resource_cleanup_queue\" WHERE \"resourceId\"=? AND \"status\"='pending'";
+        try (Connection c = db.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, resourceId);
+            try (ResultSet rows = ps.executeQuery()) {
+                return rows.next();
+            }
+        } catch (SQLException e) {
             return false;
         }
     }

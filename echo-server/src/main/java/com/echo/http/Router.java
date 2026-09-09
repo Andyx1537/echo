@@ -16,12 +16,14 @@ public final class Router {
     /** 单条路由定义。 */
     public static final class Entry {
         final String method;
+        final String template;
         final String[] segments;
         final Route route;
         final boolean isPublic;
 
         Entry(String method, String path, Route route, boolean isPublic) {
             this.method = method;
+            this.template = path;
             this.segments = split(path);
             this.route = route;
             this.isPublic = isPublic;
@@ -36,6 +38,21 @@ public final class Router {
         Match(Entry entry, Map<String, String> pathParams) {
             this.entry = entry;
             this.pathParams = pathParams;
+        }
+
+        /** Execute the matched route without exposing the route entry internals. */
+        public Object handle(RequestContext context) throws Exception {
+            return entry.route.handle(context);
+        }
+
+        /** Whether the matched route intentionally bypasses bearer authentication. */
+        public boolean isPublic() {
+            return entry.isPublic;
+        }
+
+        /** Stable route template for metrics/logging; never contains decoded path parameters. */
+        public String routeTemplate() {
+            return entry.template;
         }
     }
 

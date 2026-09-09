@@ -176,6 +176,126 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_account_profile_uk_device" ON "t_account_pr
 -- 已有账号表补列（幂等）：
 ALTER TABLE "t_account_profile" ADD COLUMN IF NOT EXISTS "trainConsent" smallint NOT NULL DEFAULT 0;
 
+-- ----------------------------- 持久身份 -------------------------------------
+-- phone-account-resolution-v1：数据库只保存登录秘密的 HMAC 摘要；登录会话和
+-- 设备凭据没有自然到期，仅由绑定、切号、退出或治理显式撤销。
+CREATE TABLE IF NOT EXISTS "t_auth_session" (
+    "sessionId" varchar(64) NOT NULL,
+    "tokenHash" varchar(64) NOT NULL,
+    "accountId" bigint NOT NULL,
+    "kind" varchar(16) NOT NULL,
+    "status" varchar(16) NOT NULL DEFAULT 'active',
+    "deviceCredentialId" varchar(64),
+    "createdAt" bigint NOT NULL,
+    "revokedAt" bigint,
+    PRIMARY KEY ("sessionId")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_auth_session_uk_token" ON "t_auth_session" ("tokenHash");
+CREATE INDEX IF NOT EXISTS "t_auth_session_idx_account_status" ON "t_auth_session" ("accountId", "status");
+
+CREATE TABLE IF NOT EXISTS "t_device_credential" (
+    "credentialId" varchar(64) NOT NULL,
+    "credentialHash" varchar(64) NOT NULL,
+    "accountId" bigint NOT NULL,
+    "status" varchar(24) NOT NULL,
+    "revocationReason" varchar(32),
+    "createdAt" bigint NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("credentialId")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_device_credential_uk_hash" ON "t_device_credential" ("credentialHash");
+CREATE INDEX IF NOT EXISTS "t_device_credential_idx_account_status" ON "t_device_credential" ("accountId", "status");
+
+CREATE TABLE IF NOT EXISTS "t_phone_credential" (
+    "phoneHash" varchar(64) NOT NULL,
+    "phoneCipher" text NOT NULL,
+    "accountId" bigint NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("phoneHash")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_phone_credential_uk_account" ON "t_phone_credential" ("accountId");
+
+CREATE TABLE IF NOT EXISTS "t_phone_challenge" (
+    "challengeId" varchar(64) NOT NULL,
+    "accountId" bigint NOT NULL,
+    "sessionId" varchar(64) NOT NULL,
+    "phoneHash" varchar(64) NOT NULL,
+    "phoneCipher" text NOT NULL,
+    "codeHash" varchar(64) NOT NULL,
+    "purpose" varchar(32) NOT NULL,
+    "continuationIntent" varchar(48) NOT NULL,
+    "resourceId" varchar(64),
+    "schemaVersion" varchar(16),
+    "status" varchar(16) NOT NULL,
+    "attemptCount" integer NOT NULL DEFAULT 0,
+    "expiresAt" bigint NOT NULL,
+    "resendAvailableAt" bigint NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("challengeId")
+);
+CREATE INDEX IF NOT EXISTS "t_phone_challenge_idx_phone_purpose" ON "t_phone_challenge" ("phoneHash", "purpose", "createdAt" DESC);
+
+CREATE TABLE IF NOT EXISTS "t_phone_resolution" (
+    "resolutionId" varchar(64) NOT NULL,
+    "tokenHash" varchar(64) NOT NULL,
+    "challengeId" varchar(64) NOT NULL,
+    "sourceAccountId" bigint NOT NULL,
+    "sourceSessionId" varchar(64) NOT NULL,
+    "resolution" varchar(24) NOT NULL,
+    "targetAccountId" bigint,
+    "phoneHash" varchar(64) NOT NULL,
+    "phoneCipher" text NOT NULL,
+    "continuationIntent" varchar(48) NOT NULL,
+    "resourceId" varchar(64),
+    "schemaVersion" varchar(16),
+    "status" varchar(16) NOT NULL,
+    "expiresAt" bigint NOT NULL,
+    "usedAt" bigint,
+    PRIMARY KEY ("resolutionId")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_phone_resolution_uk_token" ON "t_phone_resolution" ("tokenHash");
+CREATE UNIQUE INDEX IF NOT EXISTS "t_phone_resolution_uk_challenge" ON "t_phone_resolution" ("challengeId");
+
+CREATE TABLE IF NOT EXISTS "t_auth_idempotency" (
+    "operation" varchar(48) NOT NULL,
+    "actorScope" varchar(128) NOT NULL,
+    "idempotencyKey" varchar(128) NOT NULL,
+    "requestHash" varchar(64) NOT NULL,
+    "responseCipher" text,
+    "status" varchar(16) NOT NULL DEFAULT 'processing',
+    "replayUntil" bigint NOT NULL,
+    "resultSessionId" varchar(64),
+    "resultDeviceCredentialId" varchar(64),
+    "createdAt" bigint NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("operation", "actorScope", "idempotencyKey")
+);
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "replayUntil" bigint NOT NULL DEFAULT 0;
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "resultSessionId" varchar(64);
+ALTER TABLE "t_auth_idempotency" ADD COLUMN IF NOT EXISTS "resultDeviceCredentialId" varchar(64);
+CREATE INDEX IF NOT EXISTS "t_auth_idempotency_idx_created" ON "t_auth_idempotency" ("createdAt");
+
+CREATE TABLE IF NOT EXISTS "t_auth_rate_event" (
+    "eventId" varchar(64) NOT NULL,
+    "dimension" varchar(16) NOT NULL,
+    "subjectHash" varchar(64) NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("eventId")
+);
+CREATE INDEX IF NOT EXISTS "t_auth_rate_event_idx_window" ON "t_auth_rate_event" ("dimension", "subjectHash", "createdAt");
+
+CREATE TABLE IF NOT EXISTS "t_auth_audit" (
+    "auditId" varchar(64) NOT NULL,
+    "eventType" varchar(48) NOT NULL,
+    "accountId" bigint,
+    "sessionId" varchar(64),
+    "subjectHash" varchar(64),
+    "detail" text,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("auditId")
+);
+CREATE INDEX IF NOT EXISTS "t_auth_audit_idx_account_time" ON "t_auth_audit" ("accountId", "createdAt" DESC);
+
 -- ----------------------------- 往宠档案 -------------------------------------
 -- temperature 只由主人回访驱动、地板 60（PRD §3.11）；seenCount/flowersReceived 仅 owner 私域可见。
 CREATE TABLE IF NOT EXISTS "t_pet" (
@@ -1333,6 +1453,17 @@ CREATE INDEX IF NOT EXISTS "t_resource_idx_owner"
 CREATE INDEX IF NOT EXISTS "t_resource_idx_key"
     ON "t_resource" ("storageKey");
 
+CREATE TABLE IF NOT EXISTS "t_resource_cleanup_queue" (
+    "resourceId" varchar(64) NOT NULL REFERENCES "t_resource"("resourceId") ON DELETE CASCADE,
+    "reason" varchar(64) NOT NULL,
+    "status" varchar(16) NOT NULL DEFAULT 'pending',
+    "queuedAt" bigint NOT NULL,
+    "completedAt" bigint,
+    PRIMARY KEY ("resourceId")
+);
+CREATE INDEX IF NOT EXISTS "t_resource_cleanup_queue_idx_pending"
+    ON "t_resource_cleanup_queue" ("status", "queuedAt");
+
 -- ============================== 行为证据与适配（G-30 / G-34） ==============================
 -- 四类对象分存。所谓“清除适配档案”只让在线结果退出生效链，不物理删除技术积累。
 
@@ -1521,9 +1652,72 @@ CREATE TABLE IF NOT EXISTS "t_adaptation_profile_clear" (
 CREATE INDEX IF NOT EXISTS "t_adaptation_clear_idx_account_time"
     ON "t_adaptation_profile_clear" ("accountId", "clearedAt" DESC);
 
+-- ----------------------- 私域单宠建档会话 -------------------------------
+-- 主会话保存权威状态与完整聚合；五张附属表是可独立审计/演进的领域投影，
+-- 与主会话版本在同一事务更新。禁止回落到进程内 Map。
+CREATE TABLE IF NOT EXISTS "t_onboarding_session" (
+    "onboardingId"  varchar(64) NOT NULL,
+    "accountId"     bigint      NOT NULL,
+    "status"        varchar(32) NOT NULL,
+    "currentStep"   varchar(32) NOT NULL,
+    "sessionVersion" bigint     NOT NULL DEFAULT 0,
+    "payload"       text        NOT NULL,
+    "createdAt"     bigint      NOT NULL,
+    "updatedAt"     bigint      NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE INDEX IF NOT EXISTS "t_onboarding_session_idx_owner_updated"
+    ON "t_onboarding_session" ("accountId", "updatedAt" DESC);
+CREATE INDEX IF NOT EXISTS "t_onboarding_session_idx_status"
+    ON "t_onboarding_session" ("status", "updatedAt");
+
+CREATE TABLE IF NOT EXISTS "t_onboarding_subject" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "payload" text NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE TABLE IF NOT EXISTS "t_onboarding_asset" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "payload" text NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE TABLE IF NOT EXISTS "t_onboarding_answer" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "payload" text NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE TABLE IF NOT EXISTS "t_pet_profile_fact" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "payload" text NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE TABLE IF NOT EXISTS "t_generation_anchor" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "payload" text NOT NULL,
+    "updatedAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId")
+);
+CREATE TABLE IF NOT EXISTS "t_onboarding_idempotency" (
+    "onboardingId" varchar(64) NOT NULL REFERENCES "t_onboarding_session"("onboardingId") ON DELETE CASCADE,
+    "idempotencyKey" varchar(128) NOT NULL,
+    "requestHash" varchar(64) NOT NULL,
+    "responseJson" text NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("onboardingId", "idempotencyKey")
+);
+CREATE INDEX IF NOT EXISTS "t_onboarding_idempotency_idx_created"
+    ON "t_onboarding_idempotency" ("createdAt");
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
        (2026083102, 1788181200000),
-       (2026090301, 1788418800000)
+       (2026090301, 1788418800000),
+       (2026090601, 1788678000000),
+       (2026090701, 1788764400000),
+       (2026090702, 1788768000000)
 ON CONFLICT ("version") DO NOTHING;

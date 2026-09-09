@@ -202,14 +202,25 @@ public class EchoApi {
     public Router routes(boolean devRoutes) {
         Router r = new Router();
         // §1 鉴权/账号
-        r.addPublic("POST", "/auth/guest", this::authGuest);
-        r.add("POST", "/auth/bind", this::authBind);
+        Route retiredAuth = ctx -> { throw new ApiException(ApiException.GONE,
+                "登录方式已经更新，请使用手机号登录。", "endpoint_retired"); };
+        r.addPublic("POST", "/auth/guest", retiredAuth);
+        r.addPublic("POST", "/auth/bind", retiredAuth);
         r.add("GET", "/me", this::me);
         // §2 建档
-        r.add("POST", "/pet/onboarding/detect", this::onboardingDetect);
-        r.add("POST", "/pet/onboarding/start", this::onboardingStart);
-        r.add("POST", "/pet/onboarding/refine", this::onboardingRefine);
-        r.add("POST", "/pet/onboarding/confirm", this::onboardingConfirm);
+        if (Boolean.parseBoolean(System.getProperty("echo.onboarding.legacy.enabled", "true"))) {
+            r.add("POST", "/pet/onboarding/detect", this::onboardingDetect);
+            r.add("POST", "/pet/onboarding/start", this::onboardingStart);
+            r.add("POST", "/pet/onboarding/refine", this::onboardingRefine);
+            r.add("POST", "/pet/onboarding/confirm", this::onboardingConfirm);
+        } else {
+            Route retired = ctx -> { throw new ApiException(ApiException.GONE,
+                    "旧建档入口已经更新，请从新的建档流程继续。", "endpoint_retired"); };
+            r.add("POST", "/pet/onboarding/detect", retired);
+            r.add("POST", "/pet/onboarding/start", retired);
+            r.add("POST", "/pet/onboarding/refine", retired);
+            r.add("POST", "/pet/onboarding/confirm", retired);
+        }
         // 注：POST /upload 由 HttpGateway 直接处理（需原始字节 + multipart 解析），不走 JSON 路由
         // §3 我的它
         r.add("GET", "/pet/me", this::petMe);

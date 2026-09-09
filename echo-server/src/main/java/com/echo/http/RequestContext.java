@@ -1,6 +1,7 @@
 package com.echo.http;
 
 import com.google.gson.JsonObject;
+import com.echo.http.auth.AuthPrincipal;
 
 import java.util.Map;
 
@@ -14,14 +15,38 @@ public final class RequestContext {
     private final Map<String, String> query;
     private final JsonObject body;
     private final long accountId;
+    private final Map<String, String> headers;
+    private final AuthPrincipal principal;
+    private final String clientIp;
 
     public RequestContext(String method, Map<String, String> pathParams,
                           Map<String, String> query, JsonObject body, long accountId) {
+        this(method, pathParams, query, body, accountId, Map.of());
+    }
+
+    public RequestContext(String method, Map<String, String> pathParams,
+                          Map<String, String> query, JsonObject body, long accountId,
+                          Map<String, String> headers) {
         this.method = method;
         this.pathParams = pathParams;
         this.query = query;
         this.body = body;
         this.accountId = accountId;
+        this.headers = headers == null ? Map.of() : Map.copyOf(headers);
+        this.principal = accountId == 0 ? null : new AuthPrincipal(accountId, null, "legacy", null);
+        this.clientIp = "unknown";
+    }
+
+    public RequestContext(String method, Map<String, String> pathParams, Map<String, String> query,
+                          JsonObject body, AuthPrincipal principal, Map<String, String> headers, String clientIp) {
+        this.method = method;
+        this.pathParams = pathParams;
+        this.query = query;
+        this.body = body;
+        this.principal = principal;
+        this.accountId = principal == null ? 0L : principal.accountId();
+        this.headers = headers == null ? Map.of() : Map.copyOf(headers);
+        this.clientIp = clientIp == null ? "unknown" : clientIp;
     }
 
     public String method() {
@@ -71,4 +96,12 @@ public final class RequestContext {
     public long accountId() {
         return accountId;
     }
+
+    public String header(String name) {
+        return headers.get(name.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    public AuthPrincipal principal() { return principal; }
+
+    public String clientIp() { return clientIp; }
 }

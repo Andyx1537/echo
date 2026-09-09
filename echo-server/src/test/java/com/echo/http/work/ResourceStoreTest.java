@@ -45,4 +45,23 @@ class ResourceStoreTest {
         assertFalse(store.record(null, 100L, "k", "image/jpeg", 1L, 1L));
         assertFalse(store.record("res-2", 0L, "k", "image/jpeg", 1L, 1L));
     }
+
+    @Test
+    void 孤立素材撤销后不可用且原上传者可安全重试() {
+        assertTrue(store.record("res-retry", 100L, "old", "image/jpeg", 10L, 1L));
+        assertTrue(store.revoke("res-retry", 100L, 2L));
+        assertFalse(store.ownedBy("res-retry", 100L));
+        assertTrue(store.cleanupQueued("res-retry"));
+        assertTrue(store.record("res-retry", 100L, "new", "image/jpeg", 10L, 3L));
+        assertTrue(store.ownedBy("res-retry", 100L));
+        assertFalse(store.cleanupQueued("res-retry"));
+    }
+
+    @Test
+    void 资源编号冲突不能改写到另一个账号() {
+        assertTrue(store.record("res-owner", 100L, "old", "image/jpeg", 10L, 1L));
+        assertFalse(store.record("res-owner", 200L, "new", "image/jpeg", 10L, 2L));
+        assertTrue(store.ownedBy("res-owner", 100L));
+        assertFalse(store.ownedBy("res-owner", 200L));
+    }
 }
