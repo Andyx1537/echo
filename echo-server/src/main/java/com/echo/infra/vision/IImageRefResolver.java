@@ -19,4 +19,12 @@ public interface IImageRefResolver {
      *         由调用方走 fallback，<b>实现不得抛异常</b>
      */
     String resolve(String resourceId);
+
+    /**
+     * 定妆图生图用的底图。视觉压缩会把竖图宽度压到万相 512 下限以下，所以不能复用 {@link #resolve}。
+     * 默认仍走 {@link #resolve}，本地存储实现会改成按图生图尺寸适配。
+     */
+    default String resolveForImageEdit(String resourceId) {
+        return resolve(resourceId);
+    }
 }

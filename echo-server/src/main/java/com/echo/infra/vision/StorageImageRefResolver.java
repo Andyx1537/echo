@@ -48,6 +48,15 @@ public class StorageImageRefResolver implements IImageRefResolver {
 
     @Override
     public String resolve(String resourceId) {
+        return resolve(resourceId, false);
+    }
+
+    @Override
+    public String resolveForImageEdit(String resourceId) {
+        return resolve(resourceId, true);
+    }
+
+    private String resolve(String resourceId, boolean forImageEdit) {
         if (resourceId == null || resourceId.isBlank()) {
             log.warn("Vision 资源解析失败: step=resolve, reason=resourceId 为空");
             return null;
@@ -68,8 +77,9 @@ public class StorageImageRefResolver implements IImageRefResolver {
                 log.warn("Vision 资源解析失败: step=resolve, reason=素材不存在或为空, resourceId={}", id);
                 return null;
             }
-            ImageCompressor.Image image =
-                    ImageCompressor.compress(loaded.data(), loaded.contentType(), maxEdge, quality, targetBase64Bytes);
+            ImageCompressor.Image image = forImageEdit
+                    ? ImageCompressor.fitForImageEdit(loaded.data(), loaded.contentType())
+                    : ImageCompressor.compress(loaded.data(), loaded.contentType(), maxEdge, quality, targetBase64Bytes);
             int base64Size = image.base64Size();
             if (base64Size > HARD_LIMIT_BASE64_BYTES) {
                 log.warn("Vision 资源解析失败: step=compress, reason=压缩后仍超硬上限（{}B > {}B），"
@@ -77,11 +87,12 @@ public class StorageImageRefResolver implements IImageRefResolver {
                         base64Size, HARD_LIMIT_BASE64_BYTES, id, image.compressed());
                 return null;
             }
-            if (!image.compressed()) {
+            if (!image.compressed() && !forImageEdit) {
                 log.warn("Vision 资源解析: step=compress, 压缩未生效（走安全回退，原图发送）, "
                         + "resourceId={}, mime={}, base64={}B", id, image.mime(), base64Size);
             }
-            log.info("Vision 资源解析: resourceId={} → data-uri, mime={}, 原始={}B, 发送={}B(base64 {}B)",
+            log.info("{}: resourceId={} → data-uri, mime={}, 原始={}B, 发送={}B(base64 {}B)",
+                    forImageEdit ? "定妆底图解析" : "Vision 资源解析",
                     id, image.mime(), loaded.data().length, image.data().length, base64Size);
             return toDataUri(image);
         } catch (Exception e) {

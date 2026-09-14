@@ -58,7 +58,10 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
         this.imageRefs = imageRefs;
         this.mediaPublisher = mediaPublisher;
         this.provenance = provenance;
-        this.downloadHttp = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.downloadHttp = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
     }
 
     @Override
@@ -102,7 +105,7 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
         if (resourceId == null || imageRefs == null) {
             throw new IllegalStateException("真出图需要已选定的肖像");
         }
-        String ref = imageRefs.resolve(resourceId);
+        String ref = imageRefs.resolveForImageEdit(resourceId);
         if (ref == null) {
             throw new IllegalStateException("肖像读不出来，无法出定妆图");
         }

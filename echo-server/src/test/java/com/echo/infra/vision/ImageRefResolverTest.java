@@ -129,6 +129,44 @@ class ImageRefResolverTest {
         assertThat(out.mime()).isEqualTo("image/png");
     }
 
+    @Test
+    void visionShrinkCanDropPortraitWidthBelowWanxMinimum() throws IOException {
+        byte[] png = photoLikePng(800, 1283);
+        ImageCompressor.Image vision = ImageCompressor.compress(png, "image/png");
+        BufferedImage decoded = ImageIO.read(new java.io.ByteArrayInputStream(vision.data()));
+        assertThat(decoded.getWidth()).isLessThan(ImageCompressor.IMAGE_EDIT_MIN_SIDE);
+    }
+
+    @Test
+    void imageEditFitKeepsPortraitWidthAtLeast512() throws IOException {
+        byte[] png = photoLikePng(800, 1283);
+        ImageCompressor.Image edit = ImageCompressor.fitForImageEdit(png, "image/png");
+        BufferedImage decoded = ImageIO.read(new java.io.ByteArrayInputStream(edit.data()));
+        assertThat(decoded.getWidth()).isGreaterThanOrEqualTo(ImageCompressor.IMAGE_EDIT_MIN_SIDE);
+        assertThat(decoded.getHeight()).isLessThanOrEqualTo(ImageCompressor.IMAGE_EDIT_MAX_SIDE);
+    }
+
+    @Test
+    void imageEditFitUpscalesSmallPortrait() throws IOException {
+        byte[] png = photoLikePng(400, 640);
+        ImageCompressor.Image edit = ImageCompressor.fitForImageEdit(png, "image/png");
+        BufferedImage decoded = ImageIO.read(new java.io.ByteArrayInputStream(edit.data()));
+        assertThat(Math.min(decoded.getWidth(), decoded.getHeight()))
+                .isGreaterThanOrEqualTo(ImageCompressor.IMAGE_EDIT_MIN_SIDE);
+    }
+
+    @Test
+    void imageEditResolverDoesNotUseVisionMaxEdge(@TempDir Path dir) throws IOException {
+        IStorage storage = new LocalDiskStorage(dir.toString(), "");
+        byte[] png = photoLikePng(800, 1283);
+        IStorage.Stored stored = storage.put("portrait-1", png, "image/png", "dog.png");
+        String ref = new StorageImageRefResolver(storage).resolveForImageEdit(stored.resourceId());
+        assertThat(ref).startsWith("data:image/");
+        String base64 = ref.substring(ref.indexOf(',') + 1);
+        BufferedImage decoded = ImageIO.read(new java.io.ByteArrayInputStream(Base64.getDecoder().decode(base64)));
+        assertThat(decoded.getWidth()).isGreaterThanOrEqualTo(ImageCompressor.IMAGE_EDIT_MIN_SIDE);
+    }
+
     /** 造一张「像照片」的 PNG：渐变 + 圆斑，细节足够多，压缩前体积很大。 */
     private static byte[] photoLikePng(int w, int h) throws IOException {
         BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);

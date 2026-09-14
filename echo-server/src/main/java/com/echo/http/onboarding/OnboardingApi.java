@@ -12,6 +12,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import lombok.extern.slf4j.Slf4j;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -24,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 
 /** HTTP application service for the frozen private onboarding slice. */
+@Slf4j
 public final class OnboardingApi {
     private static final Gson GSON = new Gson();
     private static final Map<String, Set<String>> OPTIONS = Map.of(
@@ -405,6 +407,10 @@ public final class OnboardingApi {
 
     private void completeGeneration(String id, String jobId, List<OnboardingAggregate.Candidate> candidates,
                                     Throwable failure, boolean refine) {
+        if (failure != null) {
+            log.warn("定妆生成失败 onboardingId={} jobId={} refine={} cause={}",
+                    id, jobId, refine, failure.toString(), failure);
+        }
         repository.mutateSystem(id, s -> {
             if (s.generationJob == null || !jobId.equals(s.generationJob.jobId)) return false;
             if (failure != null) return failInterruptedJob(s);

@@ -53,6 +53,10 @@ public final class ImageCompressor {
     /** 尺寸下限：再小就影响识别了。 */
     private static final int MIN_EDGE = 320;
 
+    /** 万相图生图要求宽高都落在这个区间；视觉压缩的 768 最长边会把竖图宽度压到 512 以下。 */
+    public static final int IMAGE_EDIT_MIN_SIDE = 512;
+    public static final int IMAGE_EDIT_MAX_SIDE = 4096;
+
     /** 质量下限。 */
     private static final float MIN_QUALITY = 0.4f;
 
@@ -77,6 +81,40 @@ public final class ImageCompressor {
     /** 按默认参数压缩（最长边 {@value #DEFAULT_MAX_EDGE}px、质量 {@value #DEFAULT_QUALITY}）。 */
     public static Image compress(byte[] data, String mime) {
         return compress(data, mime, DEFAULT_MAX_EDGE, DEFAULT_QUALITY, DEFAULT_MAX_BASE64_BYTES);
+    }
+
+    /**
+     * 定妆图生图用：保证最短边 ≥ {@value #IMAGE_EDIT_MIN_SIDE}、最长边 ≤ {@value #IMAGE_EDIT_MAX_SIDE}。
+     * 已经在区间内则原样返回，避免视觉侧的 768 缩边把竖图宽度压到供应商下限以下。
+     */
+    public static Image fitForImageEdit(byte[] data, String mime) {
+        if (data == null || data.length == 0) {
+            return new Image(data, mime, false);
+        }
+        try {
+            BufferedImage src = ImageIO.read(new ByteArrayInputStream(data));
+            if (src == null) {
+                log.warn("定妆底图跳过：ImageIO 无法解码该格式，原样发送, mime={}, size={}B", mime, data.length);
+                return new Image(data, mime, false);
+            }
+            int w = src.getWidth();
+            int h = src.getHeight();
+            int min = Math.min(w, h);
+            int max = Math.max(w, h);
+            if (min >= IMAGE_EDIT_MIN_SIDE && max <= IMAGE_EDIT_MAX_SIDE) {
+                return new Image(data, mime, false);
+            }
+            byte[] jpeg = toJpeg(scaleToBox(src, IMAGE_EDIT_MIN_SIDE, IMAGE_EDIT_MAX_SIDE), DEFAULT_QUALITY);
+            if (jpeg == null) {
+                log.warn("定妆底图缩放失败：无 JPEG 编码器，原样发送, mime={}, size={}B", mime, data.length);
+                return new Image(data, mime, false);
+            }
+            log.debug("定妆底图已适配: {}x{} → 发送 {}B jpeg", w, h, jpeg.length);
+            return new Image(jpeg, "image/jpeg", true);
+        } catch (Exception e) {
+            log.warn("定妆底图适配异常，原样发送, mime={}, size={}B, msg={}", mime, data.length, e.toString());
+            return new Image(data, mime, false);
+        }
     }
 
     /**
@@ -136,6 +174,24 @@ public final class ImageCompressor {
         return 4 * ((data.length + 2) / 3);
     }
 
+    /** 等比缩放到最短边不少于 {@code minSide}、最长边不超过 {@code maxSide}。 */
+    private static BufferedImage scaleToBox(BufferedImage src, int minSide, int maxSide) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        double scale = 1.0;
+        int min = Math.min(w, h);
+        int max = Math.max(w, h);
+        if (min > 0 && min < minSide) {
+            scale = (double) minSide / min;
+        }
+        if (max * scale > maxSide) {
+            scale = (double) maxSide / max;
+        }
+        int tw = Math.max(1, (int) Math.round(w * scale));
+        int th = Math.max(1, (int) Math.round(h * scale));
+        return redraw(src, tw, th);
+    }
+
     /** 等比缩放到最长边不超过 {@code maxEdge}；本来就够小则原图返回。 */
     private static BufferedImage scaleToMaxEdge(BufferedImage src, int maxEdge) {
         int w = src.getWidth();
@@ -148,6 +204,10 @@ public final class ImageCompressor {
             tw = Math.max(1, (int) Math.round(w * ratio));
             th = Math.max(1, (int) Math.round(h * ratio));
         }
+        return redraw(src, tw, th);
+    }
+
+    private static BufferedImage redraw(BufferedImage src, int tw, int th) {
         // 即便不缩放也要重绘到 TYPE_INT_RGB：JPEG 不支持透明通道，PNG 的 alpha 直接编码会串色
         BufferedImage dst = new BufferedImage(tw, th, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = dst.createGraphics();
@@ -155,7 +215,6 @@ public final class ImageCompressor {
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            // 透明区域铺白，避免变成黑块
             g.setColor(Color.WHITE);
             g.fillRect(0, 0, tw, th);
             g.drawImage(src, 0, 0, tw, th, null);

@@ -58,6 +58,22 @@ class ApiImageGenClientTest {
     }
 
     @Test
+    void keepsPollingIfSuccessHasNoUrlsYet() throws Exception {
+        HttpResponse<String> submitted = resp(200, "{\"output\":{\"task_id\":\"t1\"}}");
+        HttpResponse<String> empty = resp(200, "{\"output\":{\"task_status\":\"SUCCEEDED\",\"results\":[]}}");
+        HttpResponse<String> done = resp(200, "{\"output\":{\"task_status\":\"SUCCEEDED\",\"results\":["
+                + "{\"url\":\"https://cdn.example/a.png\"},"
+                + "{\"url\":\"https://cdn.example/b.png\"},"
+                + "{\"url\":\"https://cdn.example/c.png\"}]}}");
+        HttpClient http = mock(HttpClient.class);
+        when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(submitted, empty, done);
+        ApiImageGenClient client = new ApiImageGenClient(CONFIG, http, Duration.ofSeconds(2));
+        List<GeneratedImage> images = client.stylize("data:image/jpeg;base64,abc");
+        assertThat(images).hasSize(3);
+    }
+
+    @Test
     void factoryStaysMockWithoutKey() {
         assertThat(ImageGenClientFactory.create(ImageGenConfig.from(Map.<String, String>of()::get)))
                 .isInstanceOf(MockImageGenClient.class);

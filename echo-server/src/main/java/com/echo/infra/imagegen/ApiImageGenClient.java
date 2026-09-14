@@ -28,7 +28,7 @@ public final class ApiImageGenClient implements IImageGenClient {
     private final Duration requestTimeout;
 
     public ApiImageGenClient(ImageGenConfig config) {
-        this(config, defaultHttp(), Duration.ofSeconds(30));
+        this(config, defaultHttp(), Duration.ofSeconds(90));
     }
 
     public ApiImageGenClient(ImageGenConfig config, HttpClient http, Duration requestTimeout) {
@@ -38,7 +38,10 @@ public final class ApiImageGenClient implements IImageGenClient {
     }
 
     private static HttpClient defaultHttp() {
-        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        return HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
     }
 
     @Override
@@ -65,7 +68,9 @@ public final class ApiImageGenClient implements IImageGenClient {
         } catch (ImageGenException e) {
             throw e;
         } catch (Exception e) {
-            throw new ImageGenException("出图失败", e);
+            log.warn("[imggen] stylize failed class={}", e.getClass().getName(), e);
+            throw new ImageGenException("出图失败：" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : " " + e.getMessage()), e);
         }
     }
 
@@ -89,10 +94,23 @@ public final class ApiImageGenClient implements IImageGenClient {
                 .header("X-DashScope-Async", "enable")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(body), StandardCharsets.UTF_8))
                 .build();
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        log.info("[imggen] submitting provider={} model={} bodyChars={}",
+                config.provider(), config.model(), GSON.toJson(body).length());
+        HttpResponse<String> response;
+        try {
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            log.warn("[imggen] submit threw class={}", e.getClass().getName(), e);
+            throw e;
+        }
         JsonObject parsed = parse(response.body());
+        log.info("[imggen] submit http={} bodyChars={}", response.statusCode(),
+                response.body() == null ? 0 : response.body().length());
         if (response.statusCode() / 100 != 2) {
             throw new ImageGenException("出图提交被拒：" + messageOf(parsed));
+        }
+        if (!output(parsed).has("task_id")) {
+            throw new ImageGenException("出图提交没有任务号");
         }
         String taskId = output(parsed).get("task_id").getAsString();
         if (taskId == null || taskId.isBlank()) {
@@ -105,7 +123,7 @@ public final class ApiImageGenClient implements IImageGenClient {
     private List<String> poll(String taskId) throws Exception {
         for (int i = 0; i < MAX_POLLS; i++) {
             HttpRequest request = HttpRequest.newBuilder(URI.create(config.taskUrl(taskId)))
-                    .timeout(requestTimeout)
+                    .timeout(Duration.ofSeconds(30))
                     .header("Authorization", "Bearer " + config.apiKey())
                     .GET()
                     .build();
@@ -113,11 +131,18 @@ public final class ApiImageGenClient implements IImageGenClient {
             JsonObject parsed = parse(response.body());
             JsonObject output = output(parsed);
             String status = output.has("task_status") ? output.get("task_status").getAsString() : "";
+            List<String> urls = urlsOf(output);
+            log.info("[imggen] poll status={} urls={} http={} bodyChars={}",
+                    status, urls.size(), response.statusCode(),
+                    response.body() == null ? 0 : response.body().length());
             if ("SUCCEEDED".equals(status)) {
-                return urlsOf(output);
+                if (!urls.isEmpty()) {
+                    return urls;
+                }
+                log.warn("[imggen] task succeeded but urls still empty, keep polling");
             }
             if ("FAILED".equals(status) || "CANCELED".equals(status) || "UNKNOWN".equals(status)) {
-                throw new ImageGenException("出图任务失败：" + messageOf(parsed));
+                throw new ImageGenException("出图任务失败：" + messageOf(parsed, output));
             }
             Thread.sleep(POLL.toMillis());
         }
@@ -139,27 +164,60 @@ public final class ApiImageGenClient implements IImageGenClient {
     }
 
     private static String messageOf(JsonObject parsed) {
+        return messageOf(parsed, output(parsed));
+    }
+
+    private static String messageOf(JsonObject parsed, JsonObject output) {
         if (parsed.has("message")) {
             return parsed.get("message").getAsString();
         }
+        if (output.has("message")) {
+            return output.get("message").getAsString();
+        }
         if (parsed.has("code")) {
             return parsed.get("code").getAsString();
+        }
+        if (output.has("code")) {
+            return output.get("code").getAsString();
         }
         return "unknown";
     }
 
     private static List<String> urlsOf(JsonObject output) {
         List<String> urls = new ArrayList<>();
-        if (!output.has("results") || !output.get("results").isJsonArray()) {
-            return urls;
-        }
-        JsonArray results = output.getAsJsonArray("results");
-        for (int i = 0; i < results.size(); i++) {
-            JsonObject item = results.get(i).getAsJsonObject();
-            if (item.has("url")) {
-                urls.add(item.get("url").getAsString());
-            }
+        collectUrls(output.has("results") ? output.get("results") : null, urls);
+        if (urls.isEmpty()) {
+            collectUrls(output.has("output") ? output.get("output") : null, urls);
         }
         return urls;
+    }
+
+    private static void collectUrls(com.google.gson.JsonElement node, List<String> urls) {
+        if (node == null || node.isJsonNull()) {
+            return;
+        }
+        if (node.isJsonArray()) {
+            JsonArray items = node.getAsJsonArray();
+            for (int i = 0; i < items.size(); i++) {
+                collectUrls(items.get(i), urls);
+            }
+            return;
+        }
+        if (node.isJsonPrimitive() && node.getAsJsonPrimitive().isString()) {
+            String value = node.getAsString();
+            if (value.startsWith("http://") || value.startsWith("https://")) {
+                urls.add(value);
+            }
+            return;
+        }
+        if (!node.isJsonObject()) {
+            return;
+        }
+        JsonObject item = node.getAsJsonObject();
+        if (item.has("url") && item.get("url").isJsonPrimitive()) {
+            urls.add(item.get("url").getAsString());
+        } else if (item.has("image_url") && item.get("image_url").isJsonPrimitive()) {
+            urls.add(item.get("image_url").getAsString());
+        }
     }
 }
