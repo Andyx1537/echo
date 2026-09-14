@@ -3,6 +3,7 @@ package com.echo.http.onboarding;
 import com.aengine.util.id.IDGenerator;
 import com.echo.infra.imagegen.GeneratedImage;
 import com.echo.infra.imagegen.IImageGenClient;
+import com.echo.infra.llm.ILlmClient;
 import com.echo.infra.llm.MockLlmClient;
 import org.junit.jupiter.api.Test;
 
@@ -70,5 +71,36 @@ class OnboardingImageGenTest {
         assertThatThrownBy(() -> port.buildCandidates(new OnboardingAggregate.Anchor(), null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("肖像");
+    }
+
+    @Test
+    void englishJsonDumpFallsBackToChineseSignature() {
+        OnboardingAggregate.Anchor anchor = new OnboardingAggregate.Anchor();
+        anchor.answerSnapshot = "[{\"questionId\":\"Q1\",\"answerCodes\":[\"home\"]},"
+                + "{\"questionId\":\"Q2\",\"answerCodes\":[\"tiny\"]}]";
+        ILlmClient noisy = new ILlmClient() {
+            @Override
+            public String enrich(String rawPrefs) {
+                return rawPrefs;
+            }
+
+            @Override
+            public String complete(String prompt) {
+                assertThat(prompt).startsWith("private-pet-onboarding\n");
+                assertThat(prompt).contains("facts=home,tiny");
+                assertThat(prompt).doesNotContain("questionId");
+                return "It looks like you've shared a JSON array representing answers from a pet onboarding flow.";
+            }
+        };
+        List<OnboardingAggregate.Candidate> candidates = new ExecutorOnboardingGenerationPort(
+                noisy, new IDGenerator(63), Runnable::run).buildCandidates(anchor, null);
+        assertThat(candidates).hasSize(3).allSatisfy(candidate ->
+                assertThat(candidate.signature).isEqualTo("从熟悉的日常，慢慢认出它"));
+    }
+
+    @Test
+    void chineseSignatureIsKept() {
+        assertThat(ExecutorOnboardingGenerationPort.candidateSignature("门口那一小团还在等"))
+                .isEqualTo("门口那一小团还在等");
     }
 }

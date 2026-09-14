@@ -34,6 +34,8 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
             "linear-gradient(145deg,#a9c9da,#e1edf2)"
     };
     private static final String[] EMOJIS = {"🐾", "🌤️", "✨"};
+    private static final String FALLBACK_SIGNATURE = "从熟悉的日常，慢慢认出它";
+    private static final int MAX_SIGNATURE_CHARS = 80;
 
     private final ILlmClient llm;
     private final IDGenerator ids;
@@ -77,8 +79,8 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
     }
 
     List<OnboardingAggregate.Candidate> buildCandidates(OnboardingAggregate.Anchor anchor, String adjustmentCode) {
-        String raw = llm.complete("private-pet-onboarding\n" + (anchor == null ? "" : anchor.answerSnapshot)
-                + "\nadjustment=" + (adjustmentCode == null ? "" : adjustmentCode));
+        String raw = llm.complete(onboardingPreviewPrompt(anchor, adjustmentCode));
+        String signature = candidateSignature(raw);
         List<String> imageUrls = List.of();
         if (imageGen != null && imageGen.isLive()) {
             imageUrls = liveImageUrls(anchor);
@@ -90,14 +92,74 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
             c.candidateId = String.valueOf(ids.nextId());
             c.gradient = GRADIENTS[i];
             c.emoji = EMOJIS[i];
-            c.signature = CopyGuardFilter.sanitize(raw == null || raw.isBlank() || "{}".equals(raw)
-                    ? "从熟悉的日常，慢慢认出它" : raw);
+            c.signature = signature;
             if (i < imageUrls.size()) {
                 c.imageUrl = imageUrls.get(i);
             }
             out.add(c);
         }
         return out;
+    }
+
+    static String onboardingPreviewPrompt(OnboardingAggregate.Anchor anchor, String adjustmentCode) {
+        return "private-pet-onboarding\n"
+                + "请只输出一句不超过40字的中文旁白，写这只宠物第一幅画面。不要解释，不要英文，不要JSON。\n"
+                + "facts=" + factLine(anchor == null ? null : anchor.answerSnapshot) + "\n"
+                + "adjustment=" + (adjustmentCode == null ? "" : adjustmentCode);
+    }
+
+    static String candidateSignature(String raw) {
+        if (raw == null) {
+            return CopyGuardFilter.sanitize(FALLBACK_SIGNATURE);
+        }
+        String text = raw.trim();
+        if (text.isEmpty() || "{}".equals(text) || looksLikeMetaCopy(text)) {
+            return CopyGuardFilter.sanitize(FALLBACK_SIGNATURE);
+        }
+        if (text.length() > MAX_SIGNATURE_CHARS) {
+            text = text.substring(0, MAX_SIGNATURE_CHARS).trim();
+        }
+        return CopyGuardFilter.sanitize(text);
+    }
+
+    static boolean looksLikeMetaCopy(String text) {
+        String lower = text.toLowerCase();
+        if (lower.contains("json") || lower.contains("it looks like") || lower.contains("please clarify")
+                || text.contains("{") || text.contains("[")) {
+            return true;
+        }
+        long han = text.codePoints().filter(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN).count();
+        return text.length() > 24 && han * 4 < text.length();
+    }
+
+    static String factLine(String answerSnapshot) {
+        if (answerSnapshot == null || answerSnapshot.isBlank()) {
+            return "";
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(answerSnapshot);
+            if (!parsed.isJsonArray()) {
+                return "";
+            }
+            List<String> codes = new ArrayList<>();
+            for (JsonElement element : parsed.getAsJsonArray()) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject answer = element.getAsJsonObject();
+                if (!answer.has("answerCodes") || !answer.get("answerCodes").isJsonArray()) {
+                    continue;
+                }
+                for (JsonElement code : answer.getAsJsonArray("answerCodes")) {
+                    if (code.isJsonPrimitive() && !code.getAsString().isBlank()) {
+                        codes.add(code.getAsString());
+                    }
+                }
+            }
+            return String.join(",", codes);
+        } catch (RuntimeException ignored) {
+            return "";
+        }
     }
 
     private List<String> liveImageUrls(OnboardingAggregate.Anchor anchor) {
@@ -121,19 +183,24 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
     }
 
     private String persist(GeneratedImage image) {
+        boolean canPublish = mediaPublisher != null && provenance != null && provenance.ready();
+        if (!canPublish) {
+            if (image.url() != null && !image.url().isBlank()) {
+                log.warn("[imggen] 未配置服务提供者编码，定妆图暂用供应商临时地址，不落盘");
+                return image.url();
+            }
+            throw new IllegalStateException("定妆图没有可展示的地址");
+        }
         byte[] data = image.data();
         if (data == null && image.url() != null) {
             data = download(image.url());
         }
-        if (data != null && mediaPublisher != null && provenance != null && provenance.ready()) {
+        if (data != null) {
             IStorage.Stored stored = mediaPublisher.publish(String.valueOf(ids.nextId()), data,
                     image.contentType() == null ? "image/png" : image.contentType(), "candidate.png");
             return stored.url();
         }
         if (image.url() != null && !image.url().isBlank()) {
-            if (provenance == null || !provenance.ready()) {
-                log.warn("[imggen] 未配置服务提供者编码，定妆图暂用供应商临时地址，不落盘");
-            }
             return image.url();
         }
         throw new IllegalStateException("定妆图没有可展示的地址");
