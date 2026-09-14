@@ -224,6 +224,7 @@ public final class EchoHttpBootstrap {
                 vision,
                 idGenerator);
         onboarding.register(router);
+        onboarding.recoverInterruptedJobs();
 
         SessionAuthenticator sessionAuthenticator = null;
         String authSecret = System.getenv("ECHO_AUTH_SECRET");
