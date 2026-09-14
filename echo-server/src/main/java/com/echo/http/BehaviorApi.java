@@ -1,6 +1,7 @@
 package com.echo.http;
 
 import com.aengine.util.id.IDGenerator;
+import com.echo.http.behavior.AdaptationProfileStore;
 import com.echo.http.behavior.BehaviorDictionary;
 import com.echo.http.behavior.BehaviorEvent;
 import com.echo.http.behavior.BehaviorEventStore;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Phase 0 行为事实入口。收下不等于拿去排序。
@@ -31,18 +33,26 @@ public final class BehaviorApi {
     private final IDGenerator ids;
     private final ExplicitFeedbackStore feedbacks;
     private final BehaviorLedger ledger;
+    private final AdaptationProfileStore profiles;
 
     public BehaviorApi(BehaviorEventStore events, EchoStore accounts, IDGenerator ids) {
-        this(events, accounts, ids, new ExplicitFeedbackStore(null), new BehaviorLedger(events, ids));
+        this(events, accounts, ids, new ExplicitFeedbackStore(null), new BehaviorLedger(events, ids),
+                new AdaptationProfileStore());
     }
 
     public BehaviorApi(BehaviorEventStore events, EchoStore accounts, IDGenerator ids,
                        ExplicitFeedbackStore feedbacks, BehaviorLedger ledger) {
+        this(events, accounts, ids, feedbacks, ledger, new AdaptationProfileStore());
+    }
+
+    public BehaviorApi(BehaviorEventStore events, EchoStore accounts, IDGenerator ids,
+                       ExplicitFeedbackStore feedbacks, BehaviorLedger ledger, AdaptationProfileStore profiles) {
         this.events = events;
         this.accounts = accounts;
         this.ids = ids;
         this.feedbacks = feedbacks;
         this.ledger = ledger;
+        this.profiles = profiles;
     }
 
     public BehaviorLedger ledger() {
@@ -52,6 +62,9 @@ public final class BehaviorApi {
     public void register(Router r) {
         r.add("POST", "/behavior-events/batch", this::ingest);
         r.add("POST", "/me/explicit-feedback", this::submitFeedback);
+        r.add("GET", "/me/adaptation-profile", this::profile);
+        r.add("DELETE", "/me/adaptation-profile", this::clearProfile);
+        r.add("PUT", "/me/recommendation-mode", this::setMode);
     }
 
     private Object ingest(RequestContext ctx) {
@@ -130,6 +143,52 @@ public final class BehaviorApi {
         out.put("status", row.status);
         out.put("supersedesId", row.supersedesId);
         return out;
+    }
+
+    private Object profile(RequestContext ctx) {
+        long accountId = requireAccount(ctx);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("recommendationMode", profiles.mode(accountId));
+        out.put("uiAdaptation", domain(accountId, BehaviorDictionary.UI));
+        out.put("publicRecommendation", domain(accountId, BehaviorDictionary.PUBLIC));
+        out.put("privateGeneration", domain(accountId, BehaviorDictionary.PRIVATE));
+        return out;
+    }
+
+    private Object clearProfile(RequestContext ctx) {
+        long accountId = requireAccount(ctx);
+        String scope = ctx.query("scope", "");
+        if (!Set.of(BehaviorDictionary.UI, BehaviorDictionary.PUBLIC, BehaviorDictionary.PRIVATE).contains(scope)) {
+            throw new ApiException(ApiException.BAD_PARAM, "这一块我还不认得。", BehaviorDictionary.REJECT_UNKNOWN);
+        }
+        profiles.clear(accountId, scope);
+        return profile(ctx);
+    }
+
+    private Object setMode(RequestContext ctx) {
+        long accountId = requireAccount(ctx);
+        JsonObject body = ctx.body() == null ? new JsonObject() : ctx.body();
+        String mode = Json.requireString(body, "mode");
+        if (!AdaptationProfileStore.PERSONALIZED.equals(mode)
+                && !AdaptationProfileStore.NON_PERSONALIZED.equals(mode)) {
+            throw new ApiException(ApiException.BAD_PARAM, "这一块我还不认得。", BehaviorDictionary.REJECT_UNKNOWN);
+        }
+        profiles.setMode(accountId, mode);
+        return profile(ctx);
+    }
+
+    private Map<String, Object> domain(long accountId, String scope) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("enabled", profiles.enabled(accountId, scope));
+        return row;
+    }
+
+    private long requireAccount(RequestContext ctx) {
+        long accountId = ctx.accountId();
+        if (accountId <= 0) {
+            throw new ApiException(ApiException.UNAUTHORIZED, "先让我认出你，再记下这一步。", "missing account");
+        }
+        return accountId;
     }
 
     private Map<String, Object> acceptOne(long accountId, JsonObject raw) {

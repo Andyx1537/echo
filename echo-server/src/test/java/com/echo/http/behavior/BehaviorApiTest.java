@@ -123,6 +123,22 @@ class BehaviorApiTest {
     }
 
     @Test
+    void clearAndModeDoNotEraseFacts() throws Exception {
+        postFeedback(boundId, "looks_like_it");
+        Map<String, Object> before = get(boundId, "/me/adaptation-profile");
+        assertThat(before.get("recommendationMode")).isEqualTo("personalized");
+        assertThat(((Map<?, ?>) before.get("publicRecommendation")).get("enabled")).isEqualTo(true);
+        JsonObject mode = new JsonObject();
+        mode.addProperty("mode", "non_personalized");
+        Map<String, Object> closed = put(boundId, "/me/recommendation-mode", mode);
+        assertThat(((Map<?, ?>) closed.get("publicRecommendation")).get("enabled")).isEqualTo(false);
+        Map<String, Object> cleared = delete(boundId, "/me/adaptation-profile?scope=private_generation");
+        assertThat(((Map<?, ?>) cleared.get("privateGeneration")).get("enabled")).isEqualTo(false);
+        assertThat(feedbacks.ofAccount(boundId)).hasSize(1);
+        assertThat(store.ofAccount(boundId)).isNotEmpty();
+    }
+
+    @Test
     void missingAccountIsRejectedAsWholeRequest() {
         JsonObject event = questionAnswered("no-account");
         assertThatThrownBy(() -> post(0, List.of(event)))
@@ -136,10 +152,33 @@ class BehaviorApiTest {
         return (Map<String, Object>) call("POST", "/me/explicit-feedback", viewer, feedbackBody(answer));
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> get(long viewer, String path) throws Exception {
+        return (Map<String, Object>) call("GET", path, viewer, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> put(long viewer, String path, JsonObject body) throws Exception {
+        return (Map<String, Object>) call("PUT", path, viewer, body);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> delete(long viewer, String path) throws Exception {
+        return (Map<String, Object>) call("DELETE", path, viewer, null);
+    }
+
     private Object call(String method, String path, long viewer, JsonObject body) throws Exception {
-        Router.Match match = router.match(method, path);
-        assertThat(match).as("%s %s", method, path).isNotNull();
-        return match.handle(new RequestContext(method, Map.of(), Map.of(), body, viewer, Map.of()));
+        String route = path.contains("?") ? path.substring(0, path.indexOf('?')) : path;
+        Map<String, String> query = new java.util.LinkedHashMap<>();
+        if (path.contains("?")) {
+            for (String part : path.substring(path.indexOf('?') + 1).split("&")) {
+                String[] kv = part.split("=", 2);
+                query.put(kv[0], kv.length > 1 ? kv[1] : "");
+            }
+        }
+        Router.Match match = router.match(method, route);
+        assertThat(match).as("%s %s", method, route).isNotNull();
+        return match.handle(new RequestContext(method, Map.of(), query, body, viewer, Map.of()));
     }
 
     private static JsonObject feedbackBody(String answer) {
