@@ -168,6 +168,22 @@ public final class WorkStore {
      * @param includeUnpublished 作者看自己时为 {@code true}（草稿与待审也要看得见）；
      *                           🔴 陌生人看别人时<b>必须</b>为 {@code false}
      */
+    /** The work currently occupying the author's single submission slot, if any. */
+    public Work occupyingWork(long authorId) {
+        if (!persistent()) {
+            return memory.values().stream()
+                    .filter(w -> !w.isDeleted() && w.authorId == authorId && WorkSubmissionSlot.occupies(w.status))
+                    .min(Comparator.comparingLong(w -> w.createdAt))
+                    .orElse(null);
+        }
+        List<Work> got = query("SELECT " + COLUMNS + " FROM \"t_work\""
+                        + " WHERE \"authorId\"=? AND \"deletedAt\" IS NULL"
+                        + " AND \"status\" IN ('pending','uploading','submitting')"
+                        + " ORDER BY \"createdAt\" ASC LIMIT 1",
+                List.of(authorId));
+        return got.isEmpty() ? null : got.get(0);
+    }
+
     public List<Work> worksOfAuthor(long authorId, boolean includeUnpublished, int limit) {
         if (!persistent()) {
             return memory.values().stream()

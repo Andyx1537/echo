@@ -5,6 +5,7 @@ import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkStore;
+import com.echo.http.work.WorkSubmissionSlot;
 import com.echo.http.work.WorkView;
 import com.echo.infra.storage.IStorage;
 import com.aengine.util.id.IDGenerator;
@@ -97,6 +98,13 @@ public final class WorksApi {
     private Object publish(RequestContext ctx) {
         // 🔴 S1′：把内容放到公共空间，必须已绑定。游客是无限身份，不绑定等于零成本灌站
         long me = BindingGuard.requireBound(accounts, ctx);
+        Work occupying = store.occupyingWork(me);
+        if (occupying != null) {
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "还有一条作品正在处理，先等它走完再发新的。",
+                    "submission_slot_occupied",
+                    Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
+        }
         JsonObject b = ctx.body();
 
         String mediaType = Json.getString(b, "mediaType", Work.MediaType.IMAGE);
@@ -248,7 +256,11 @@ public final class WorksApi {
         for (Work w : store.worksOfAuthor(target, self, PAGE_MAX * 5)) {
             items.add(WorkView.listItem(w, storage, self));
         }
-        return page(items, ctx);
+        Map<String, Object> out = page(items, ctx);
+        if (self) {
+            out.put("submissionCapability", WorkSubmissionSlot.capability(store.occupyingWork(target)));
+        }
+        return out;
     }
 
     /** {@code GET /works/:workId} —— 作品详情。 */
