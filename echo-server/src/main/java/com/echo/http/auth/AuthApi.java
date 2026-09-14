@@ -12,6 +12,7 @@ public final class AuthApi {
 
     public void register(Router router) {
         router.addPublic("POST", "/auth/device/session", this::deviceSession);
+        router.addPublic("POST", "/auth/account/recovery/session", this::recover);
         router.add("POST", "/auth/phone/challenges", this::challenge);
         router.add("POST", "/auth/phone/challenges/:challengeId/verify", this::verify);
         router.addPublic("POST", "/auth/phone/resolutions/:resolutionToken/confirm", this::confirm);
@@ -21,6 +22,7 @@ public final class AuthApi {
         com.echo.http.Route unavailable = ctx -> { throw new ApiException(ApiException.SERVER_ERROR,
                 "身份服务暂时不可用，请稍后再试。", "auth_persistence_unavailable"); };
         router.addPublic("POST", "/auth/device/session", unavailable);
+        router.addPublic("POST", "/auth/account/recovery/session", unavailable);
         router.add("POST", "/auth/phone/challenges", unavailable);
         router.add("POST", "/auth/phone/challenges/:challengeId/verify", unavailable);
         router.addPublic("POST", "/auth/phone/resolutions/:resolutionToken/confirm", unavailable);
@@ -29,6 +31,12 @@ public final class AuthApi {
     private Object deviceSession(RequestContext ctx) {
         onlyKeys(ctx.body(), "deviceCredential", "bootstrapNonce");
         return service.deviceSession(optional(ctx.body(), "deviceCredential"), optional(ctx.body(), "bootstrapNonce"),
+                ctx.header("Idempotency-Key"), ctx.clientIp());
+    }
+
+    private Object recover(RequestContext ctx) {
+        onlyKeys(ctx.body(), "recoveryCredential");
+        return service.recoverAnonymousSession(required(ctx.body(), "recoveryCredential"),
                 ctx.header("Idempotency-Key"), ctx.clientIp());
     }
 

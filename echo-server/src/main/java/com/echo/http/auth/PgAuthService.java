@@ -120,6 +120,49 @@ public final class PgAuthService implements SessionAuthenticator {
         }
     }
 
+    public Map<String, Object> recoverAnonymousSession(String recoveryCredential, String idempotencyKey,
+                                                       String clientIp) {
+        requireIdempotency(idempotencyKey, true);
+        if (recoveryCredential == null || !OPAQUE.matcher(recoveryCredential).matches()) {
+            throw bad("device_credential_malformed", "恢复凭据格式不正确，请从账号切换入口重新开始。", null);
+        }
+        String actor = crypto.hash("recovery-actor", recoveryCredential);
+        String requestHash = crypto.hash("request", recoveryCredential);
+        try {
+            Map<String, Object> result = db.inTransaction(c -> {
+                lock(c, "account-recovery:" + actor + ":" + idempotencyKey);
+                Map<String, Object> replay = replay(c, "account_recovery", actor, idempotencyKey, requestHash,
+                        "device_session_idempotency_conflict");
+                if (replay != null) return replay;
+                rate(c, "device", actor, 10, 30);
+                rate(c, "ip", crypto.hash("ip", safeIp(clientIp)), 20, 100);
+
+                Device found = deviceByHash(c, crypto.hash("device", recoveryCredential), true);
+                if (found == null || !"recovery_only".equals(found.status) || !isAnonymous(c, found.accountId)) {
+                    throw conflict("device_credential_recovery_required", "请从账号切换入口恢复这份资料。", null);
+                }
+                revokeDevice(c, found.id, "recovered");
+                String rawCredential = AuthCrypto.token(32);
+                String credentialId = id();
+                insertDevice(c, credentialId, rawCredential, found.accountId, "login_active", null);
+                Session issued = insertSession(c, found.accountId, "anonymous", credentialId);
+                Map<String, Object> response = map(
+                        "accountId", String.valueOf(found.accountId), "phoneBound", false,
+                        "sessionToken", issued.rawToken, "deviceCredential", rawCredential,
+                        "deviceCredentialAction", "recovered");
+                remember(c, "account_recovery", actor, idempotencyKey, requestHash, response,
+                        now() + RESOLUTION_TTL, issued.id, credentialId);
+                audit(c, "anonymous_recovered", found.accountId, issued.id, actor, null);
+                return response;
+            });
+            return raiseDeferred(result);
+        } catch (ApiException e) {
+            throw e;
+        } catch (SQLException e) {
+            throw unavailable(e);
+        }
+    }
+
     public Map<String, Object> createChallenge(AuthPrincipal principal, String phone, String purpose,
                                                 String intent, String resourceId, String schemaVersion,
                                                 String idempotencyKey, String clientIp) {

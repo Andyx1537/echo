@@ -241,6 +241,18 @@ class PhoneAuthHttpGatewayTest {
                         "{\"deviceCredential\":\"" + recoveryCredential + "\"}",
                         null, "switch-recovery-generic"),
                 409, ApiException.RULE_FORBIDDEN, "device_credential_recovery_required");
+        Response recovered = post("/auth/account/recovery/session",
+                "{\"recoveryCredential\":\"" + recoveryCredential + "\"}",
+                null, "switch-recovery-wake");
+        assertSuccess(recovered);
+        JsonObject recoveredData = recovered.json.getAsJsonObject("data");
+        assertThat(recoveredData.get("accountId").getAsString()).isEqualTo(sourceAccountId);
+        assertThat(recoveredData.get("phoneBound").getAsBoolean()).isFalse();
+        assertThat(recoveredData.get("deviceCredentialAction").getAsString()).isEqualTo("recovered");
+        assertError(post("/auth/account/recovery/session",
+                        "{\"recoveryCredential\":\"" + recoveryCredential + "\",\"accountId\":\"" + sourceAccountId + "\"}",
+                        null, "switch-recovery-account-id"),
+                400, ApiException.BAD_PARAM, "continuation_invalid");
 
         long sourceId = Long.parseLong(sourceAccountId);
         assertThat(count("SELECT COUNT(*) AS n FROM \"t_account\" a JOIN \"t_account_profile\" p "

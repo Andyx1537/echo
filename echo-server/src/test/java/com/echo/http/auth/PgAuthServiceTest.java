@@ -167,6 +167,21 @@ class PgAuthServiceTest {
                 "recover-via-generic", "10.2.0.2"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).detail()).isEqualTo("device_credential_recovery_required"));
+
+        String recoveryCredential = (String) recovery.get("recoveryCredential");
+        Map<String, Object> recovered = auth.recoverAnonymousSession(recoveryCredential, "recover-source", "10.2.0.3");
+        assertThat(recovered.get("accountId")).isEqualTo(source.get("accountId"));
+        assertThat(recovered.get("phoneBound")).isEqualTo(false);
+        assertThat(recovered.get("deviceCredentialAction")).isEqualTo("recovered");
+        assertThat(recovered.get("deviceCredential")).isNotEqualTo(recoveryCredential);
+        AuthPrincipal woken = auth.authenticate((String) recovered.get("sessionToken"));
+        assertThat(woken.accountId()).isEqualTo(Long.parseLong((String) source.get("accountId")));
+        assertThat(woken.anonymous()).isTrue();
+        assertThatThrownBy(() -> auth.recoverAnonymousSession(recoveryCredential, "recover-source-again", "10.2.0.4"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).detail()).isEqualTo("device_credential_recovery_required"));
+        Map<String, Object> replay = auth.recoverAnonymousSession(recoveryCredential, "recover-source", "10.2.0.3");
+        assertThat(replay.get("sessionToken")).isEqualTo(recovered.get("sessionToken"));
     }
 
     @Test
