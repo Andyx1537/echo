@@ -1422,6 +1422,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_source_card"
 CREATE INDEX IF NOT EXISTS "t_work_idx_origin_reviewed"
     ON "t_work" ("originType", "reviewedAt") WHERE "reviewedAt" IS NOT NULL;
 
+-- 驳回重提：当前草稿版本与上次送审版本分开，不得覆盖旧审核版本。
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "contentVersion" integer NOT NULL DEFAULT 1;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "submittedContentVersion" integer NOT NULL DEFAULT 1;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "contentHash" varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "submittedContentHash" varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "lastModerationId" bigint;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "resubmitIdempotencyKey" varchar(128);
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "reviewEvidenceId" bigint;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "reviewMode" varchar(16) NOT NULL DEFAULT '';
+
+-- 公开审核凭证：生成阶段「允许公开」的结论，不是私域可送达。
+CREATE TABLE IF NOT EXISTS "t_public_review_evidence" (
+    "reviewEvidenceId"     bigint       NOT NULL,
+    "sourceCardId"         bigint       NOT NULL,
+    "sourceContentVersion" integer      NOT NULL DEFAULT 1,
+    "result"               varchar(16)  NOT NULL,
+    "contentHash"          varchar(64)  NOT NULL,
+    "ownerAccountId"       bigint       NOT NULL,
+    "policyVersion"        varchar(64)  NOT NULL DEFAULT '',
+    "policyEpoch"          integer      NOT NULL DEFAULT 1,
+    "reviewedAt"           bigint       NOT NULL,
+    "expiresAt"            bigint       NOT NULL,
+    "aigcLabelReady"       boolean      NOT NULL DEFAULT true,
+    "consentRevoked"       boolean      NOT NULL DEFAULT false,
+    "consumedByWorkId"     bigint,
+    "invalidatedAt"        bigint,
+    "invalidationReason"   varchar(64),
+    PRIMARY KEY ("reviewEvidenceId"),
+    CONSTRAINT "t_public_review_evidence_ck_result"
+        CHECK ("result" IN ('passed','restricted','failed'))
+);
+CREATE INDEX IF NOT EXISTS "t_public_review_evidence_idx_card"
+    ON "t_public_review_evidence" ("sourceCardId");
+
 -- ============================================================
 -- 素材归属（t_resource）
 -- ============================================================
@@ -1712,6 +1746,48 @@ CREATE TABLE IF NOT EXISTS "t_onboarding_idempotency" (
 CREATE INDEX IF NOT EXISTS "t_onboarding_idempotency_idx_created"
     ON "t_onboarding_idempotency" ("createdAt");
 
+CREATE TABLE IF NOT EXISTS "t_work_comment" (
+    "id"               bigint       NOT NULL,
+    "workId"           bigint       NOT NULL,
+    "authorId"         bigint       NOT NULL,
+    "rootCommentId"    bigint,
+    "replyToCommentId" bigint,
+    "body"             text         NOT NULL,
+    "createdAt"        bigint       NOT NULL,
+    "updatedAt"        bigint       NOT NULL,
+    "displayState"     varchar(32)  NOT NULL DEFAULT 'visible',
+    "stateVersion"     integer      NOT NULL DEFAULT 1,
+    "deletedAt"        bigint,
+    "deletedBy"        bigint,
+    "deleteReason"     varchar(64),
+    PRIMARY KEY ("id"),
+    CONSTRAINT "t_work_comment_fk_work" FOREIGN KEY ("workId")
+        REFERENCES "t_work" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_work_comment_ck_state" CHECK ("displayState" IN ('visible','hidden','owner_hidden'))
+);
+CREATE INDEX IF NOT EXISTS "t_work_comment_idx_work_root"
+    ON "t_work_comment" ("workId", "rootCommentId", "createdAt");
+
+CREATE TABLE IF NOT EXISTS "t_work_favorite" (
+    "accountId" bigint NOT NULL,
+    "workId"    bigint NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("accountId", "workId"),
+    CONSTRAINT "t_work_favorite_fk_work" FOREIGN KEY ("workId")
+        REFERENCES "t_work" ("id") ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS "t_work_favorite_idx_account_time"
+    ON "t_work_favorite" ("accountId", "createdAt" DESC);
+
+CREATE TABLE IF NOT EXISTS "t_work_social_idempotency" (
+    "accountId"      bigint       NOT NULL,
+    "idempotencyKey" varchar(128) NOT NULL,
+    "requestHash"    varchar(64)  NOT NULL,
+    "responseJson"   text         NOT NULL,
+    "createdAt"      bigint       NOT NULL,
+    PRIMARY KEY ("accountId", "idempotencyKey")
+);
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
@@ -1719,5 +1795,8 @@ VALUES (2026083101, 1788177600000),
        (2026090301, 1788418800000),
        (2026090601, 1788678000000),
        (2026090701, 1788764400000),
-       (2026090702, 1788768000000)
+       (2026090702, 1788768000000),
+       (2026091401, 1789372800000),
+       (2026091402, 1789376400000),
+       (2026091403, 1789380000000)
 ON CONFLICT ("version") DO NOTHING;

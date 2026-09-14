@@ -123,6 +123,21 @@ public final class Work {
     public Long deletedBy;
     public String deleteReason;
 
+    /** 当前草稿内容版本。首次发布为 1；驳回后改内容才 +1。 */
+    public int contentVersion = 1;
+    /** 上次送审的内容版本。 */
+    public int submittedContentVersion = 1;
+    /** 当前草稿的服务端内容哈希。 */
+    public String contentHash = "";
+    /** 上次送审的内容哈希。内容变化后旧审核凭证按这份比对，不得复用。 */
+    public String submittedContentHash = "";
+    public Long lastModerationId;
+    public String resubmitIdempotencyKey;
+    /** 创建时复用的公开审核凭证。自制上传或走完整审核时为空。 */
+    public Long reviewEvidenceId;
+    /** {@code reused} / {@code full} / 空。只记录创建当时的审核路径。 */
+    public String reviewMode = "";
+
     public boolean isVideo() {
         return MediaType.VIDEO.equals(mediaType);
     }

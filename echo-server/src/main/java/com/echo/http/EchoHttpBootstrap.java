@@ -28,6 +28,12 @@ import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
+import com.echo.http.behavior.BehaviorEventStore;
+import com.echo.http.behavior.BehaviorLedger;
+import com.echo.http.behavior.ExplicitFeedbackStore;
+import com.echo.http.work.WorkCommentStore;
+import com.echo.http.work.WorkFavoriteStore;
+import com.echo.http.work.WorkReviewEvidenceStore;
 import com.echo.http.work.WorkStore;
 import com.echo.http.onboarding.EchoOnboardingWindowPort;
 import com.echo.http.onboarding.ExecutorOnboardingGenerationPort;
@@ -170,11 +176,26 @@ public final class EchoHttpBootstrap {
         // 素材归属由上传口与发布口共用一份，不要各造一个：两份实例在内存态下
         // 各持一张 Map，上传记在 A、发布查 B，校验会永远不通过。
         ResourceStore resourceStore = new ResourceStore(pgDb);
-        WorksApi worksApi = new WorksApi(new WorkStore(pgDb), store, storage, resourceStore,
+        WorkStore workStore = new WorkStore(pgDb);
+        WorksApi worksApi = new WorksApi(workStore, store, storage, resourceStore,
                 safetyGate, idGenerator);
         worksApi.setBlockService(blockService);
         worksApi.setCardStore(moderationStore);
+        worksApi.setReviewEvidenceStore(new WorkReviewEvidenceStore(pgDb));
+        WorkFavoriteStore favoriteStore = new WorkFavoriteStore(pgDb);
+        worksApi.setFavoriteStore(favoriteStore);
         worksApi.register(router);
+        WorkSocialApi socialApi = new WorkSocialApi(workStore, new WorkCommentStore(pgDb),
+                favoriteStore, store, storage, idGenerator);
+        socialApi.setBlockService(blockService);
+        BehaviorEventStore behaviorEvents = new BehaviorEventStore(pgDb);
+        BehaviorLedger behaviorLedger = new BehaviorLedger(behaviorEvents, idGenerator);
+        socialApi.setBehaviorLedger(behaviorLedger);
+        socialApi.register(router);
+        new BehaviorApi(behaviorEvents, store, idGenerator,
+                new ExplicitFeedbackStore(pgDb), behaviorLedger).register(router);
+        api.setWorkStore(workStore);
+        api.setStorage(storage);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
         logGovernanceReadiness(capabilities, switches);
@@ -237,7 +258,9 @@ public final class EchoHttpBootstrap {
                         return session != null && session.accountId == accountId
                                 && "ready_to_bind".equals(session.status);
                     }, Clock.systemUTC());
-            new AuthApi(auth).register(router);
+            AuthApi authApi = new AuthApi(auth);
+            authApi.setBehaviorLedger(behaviorLedger);
+            authApi.register(router);
             sessionAuthenticator = auth;
         } else {
             AuthApi.registerUnavailable(router);

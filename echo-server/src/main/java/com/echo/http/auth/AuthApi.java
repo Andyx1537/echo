@@ -3,12 +3,18 @@ package com.echo.http.auth;
 import com.echo.http.ApiException;
 import com.echo.http.RequestContext;
 import com.echo.http.Router;
+import com.echo.http.behavior.BehaviorLedger;
 import com.google.gson.JsonObject;
 
 /** HTTP adapter for phone-account-resolution-v1. */
 public final class AuthApi {
     private final PgAuthService service;
+    private BehaviorLedger ledger;
     public AuthApi(PgAuthService service) { this.service = service; }
+
+    public void setBehaviorLedger(BehaviorLedger ledger) {
+        this.ledger = ledger;
+    }
 
     public void register(Router router) {
         router.addPublic("POST", "/auth/device/session", this::deviceSession);
@@ -60,7 +66,23 @@ public final class AuthApi {
         String authorization = ctx.header("Authorization");
         String bearer = authorization != null && authorization.startsWith("Bearer ")
                 ? authorization.substring("Bearer ".length()).trim() : null;
-        return service.confirm(bearer, ctx.path("resolutionToken"), ctx.header("Idempotency-Key"));
+        Object result = service.confirm(bearer, ctx.path("resolutionToken"), ctx.header("Idempotency-Key"));
+        rememberBind(result);
+        return result;
+    }
+
+    private void rememberBind(Object result) {
+        if (ledger == null || !(result instanceof java.util.Map<?, ?> map)) {
+            return;
+        }
+        if (!"revoked".equals(String.valueOf(map.get("previousAnonymousCredentialDisposition")))) {
+            return;
+        }
+        try {
+            ledger.bindingCompleted(Long.parseLong(String.valueOf(map.get("accountId"))));
+        } catch (RuntimeException ignored) {
+            // 绑定已经成功，记账失败不回滚
+        }
     }
 
     private static JsonObject object(JsonObject body, String name) {

@@ -30,6 +30,10 @@ import com.echo.http.safety.ObjectContext;
 import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.safety.SafetyMetrics;
 import com.echo.http.store.EchoStore;
+import com.echo.http.work.Work;
+import com.echo.http.work.WorkStore;
+import com.echo.http.work.WorkView;
+import com.echo.infra.storage.IStorage;
 import com.echo.http.visibility.ViewerRole;
 import com.echo.http.visibility.VisibilityMatrix;
 import com.echo.http.visibility.WindowBlock;
@@ -51,10 +55,12 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -163,6 +169,21 @@ public class EchoApi {
 
     public void setCardStore(ModerationStore cardStore) {
         this.cardStore = cardStore;
+    }
+
+    /**
+     * 接上之后 {@code GET /plaza} 改发公开作品。未装配时保持发卡，
+     * 好让锁住的广场测试继续走旧路径。
+     */
+    private WorkStore workStore;
+    private IStorage storage;
+
+    public void setWorkStore(WorkStore workStore) {
+        this.workStore = workStore;
+    }
+
+    public void setStorage(IStorage storage) {
+        this.storage = storage;
     }
 
     /** 置顶口径（上限后台可配）。未装配时用默认上限 3。 */
@@ -864,8 +885,16 @@ public class EchoApi {
     /** 广场单页上限。 */
     private static final int PLAZA_PAGE_MAX = 20;
 
+    /** 匿名用户一批大约 30 条，两小时内集合与顺序固定。 */
+    private static final int ANON_PLAZA_BATCH = 30;
+    private static final long ANON_PLAZA_TTL_MS = 2L * 60 * 60 * 1000;
+    private final ConcurrentHashMap<Long, AnonPlazaBatch> anonPlazaBatches = new ConcurrentHashMap<>();
+
+    private record AnonPlazaBatch(List<Long> workIds, long startedAt) {
+    }
+
     /**
-     * {@code GET /plaza} —— 共鸣厅瀑布，🔴 <b>下发回忆卡</b>（不是宠物窗口）。
+     * {@code GET /plaza} —— 共鸣厅瀑布。接上作品库后下发公开作品；否则仍下发回忆卡。
      *
      * <p>🔴 <b>{@code items[].id} 是 {@code cardId}，不再是 {@code petId}。</b>
      * 卡上另给 {@code petId} 供前端跳窗口页——所有 {@code /windows/:petId/...} 请改用那个字段，
@@ -885,6 +914,9 @@ public class EchoApi {
      * 绝不进共鸣厅公开流——那会和权重衰减正面打架（{@link PinPolicy}）。</p>
      */
     private Object plaza(RequestContext ctx) {
+        if (workStore != null) {
+            return plazaWorks(ctx);
+        }
         long viewer = ctx.accountId();
         List<Object> items = new ArrayList<>();
         if (cardStore != null) {
@@ -910,6 +942,62 @@ public class EchoApi {
                 ctx.queryInt("limit", PLAZA_PAGE_MAX));
         attachReqId(ctx, page);
         return page;
+    }
+
+    private Object plazaWorks(RequestContext ctx) {
+        long viewer = ctx.accountId();
+        List<Work> visible = new ArrayList<>();
+        for (Work work : workStore.publicWorks(200)) {
+            if (hiddenBetween(work.authorId, viewer)) {
+                continue;
+            }
+            visible.add(work);
+        }
+        if (anonymousPlazaViewer(viewer)) {
+            visible = freezeAnonPlazaBatch(viewer, visible);
+        }
+        List<Object> items = new ArrayList<>();
+        for (Work work : visible) {
+            items.add(WorkView.listItem(work, storage, false));
+        }
+        logEvent("window_open", store.profile(ctx.accountId()));
+        Map<String, Object> page = paginate(items, ctx.queryInt("cursor", 0),
+                ctx.queryInt("limit", PLAZA_PAGE_MAX));
+        attachReqId(ctx, page);
+        return page;
+    }
+
+    private boolean anonymousPlazaViewer(long viewer) {
+        AccountProfile profile = store.profile(viewer);
+        return profile != null && profile.guest;
+    }
+
+    private List<Work> freezeAnonPlazaBatch(long viewer, List<Work> visible) {
+        long now = System.currentTimeMillis();
+        AnonPlazaBatch existing = anonPlazaBatches.get(viewer);
+        Map<Long, Work> byId = new LinkedHashMap<>();
+        for (Work work : visible) {
+            byId.put(work.id, work);
+        }
+        if (existing != null && now - existing.startedAt < ANON_PLAZA_TTL_MS) {
+            List<Work> kept = new ArrayList<>();
+            for (Long id : existing.workIds) {
+                Work work = byId.get(id);
+                if (work != null) {
+                    kept.add(work);
+                }
+            }
+            return kept;
+        }
+        List<Work> batch = visible.size() <= ANON_PLAZA_BATCH
+                ? List.copyOf(visible)
+                : List.copyOf(visible.subList(0, ANON_PLAZA_BATCH));
+        List<Long> ids = new ArrayList<>(batch.size());
+        for (Work work : batch) {
+            ids.add(work.id);
+        }
+        anonPlazaBatches.put(viewer, new AnonPlazaBatch(List.copyOf(ids), now));
+        return batch;
     }
 
     // ================================================== §6b 回忆卡（C-2 / C-5 / 置顶）
