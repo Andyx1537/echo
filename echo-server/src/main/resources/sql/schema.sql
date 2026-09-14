@@ -1429,6 +1429,32 @@ ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "contentHash" varchar(64) NOT NULL
 ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "submittedContentHash" varchar(64) NOT NULL DEFAULT '';
 ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "lastModerationId" bigint;
 ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "resubmitIdempotencyKey" varchar(128);
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "reviewEvidenceId" bigint;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "reviewMode" varchar(16) NOT NULL DEFAULT '';
+
+-- 公开审核凭证：生成阶段「允许公开」的结论，不是私域可送达。
+CREATE TABLE IF NOT EXISTS "t_public_review_evidence" (
+    "reviewEvidenceId"     bigint       NOT NULL,
+    "sourceCardId"         bigint       NOT NULL,
+    "sourceContentVersion" integer      NOT NULL DEFAULT 1,
+    "result"               varchar(16)  NOT NULL,
+    "contentHash"          varchar(64)  NOT NULL,
+    "ownerAccountId"       bigint       NOT NULL,
+    "policyVersion"        varchar(64)  NOT NULL DEFAULT '',
+    "policyEpoch"          integer      NOT NULL DEFAULT 1,
+    "reviewedAt"           bigint       NOT NULL,
+    "expiresAt"            bigint       NOT NULL,
+    "aigcLabelReady"       boolean      NOT NULL DEFAULT true,
+    "consentRevoked"       boolean      NOT NULL DEFAULT false,
+    "consumedByWorkId"     bigint,
+    "invalidatedAt"        bigint,
+    "invalidationReason"   varchar(64),
+    PRIMARY KEY ("reviewEvidenceId"),
+    CONSTRAINT "t_public_review_evidence_ck_result"
+        CHECK ("result" IN ('passed','restricted','failed'))
+);
+CREATE INDEX IF NOT EXISTS "t_public_review_evidence_idx_card"
+    ON "t_public_review_evidence" ("sourceCardId");
 
 -- ============================================================
 -- 素材归属（t_resource）
@@ -1728,5 +1754,6 @@ VALUES (2026083101, 1788177600000),
        (2026090601, 1788678000000),
        (2026090701, 1788764400000),
        (2026090702, 1788768000000),
-       (2026091401, 1789372800000)
+       (2026091401, 1789372800000),
+       (2026091402, 1789376400000)
 ON CONFLICT ("version") DO NOTHING;

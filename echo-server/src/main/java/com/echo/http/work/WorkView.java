@@ -58,6 +58,9 @@ public final class WorkView {
             m.put("sourceCardId", w.sourceCardId == null ? null : String.valueOf(w.sourceCardId));
             m.put("contentVersion", w.contentVersion);
             m.put("nextAction", WorkContent.nextAction(w));
+            if (w.reviewMode != null && !w.reviewMode.isBlank()) {
+                m.put("reviewMode", w.reviewMode);
+            }
         }
         return m;
     }

@@ -133,6 +133,10 @@ public final class Work {
     public String submittedContentHash = "";
     public Long lastModerationId;
     public String resubmitIdempotencyKey;
+    /** 创建时复用的公开审核凭证。自制上传或走完整审核时为空。 */
+    public Long reviewEvidenceId;
+    /** {@code reused} / {@code full} / 空。只记录创建当时的审核路径。 */
+    public String reviewMode = "";
 
     public boolean isVideo() {
         return MediaType.VIDEO.equals(mediaType);

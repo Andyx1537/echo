@@ -38,7 +38,7 @@ public final class WorkStore {
             + "\"createdAt\",\"updatedAt\",\"publishedAt\",\"reviewedAt\","
             + "\"deletedAt\",\"deletedBy\",\"deleteReason\","
             + "\"contentVersion\",\"submittedContentVersion\",\"contentHash\",\"submittedContentHash\","
-            + "\"lastModerationId\",\"resubmitIdempotencyKey\"";
+            + "\"lastModerationId\",\"resubmitIdempotencyKey\",\"reviewEvidenceId\",\"reviewMode\"";
 
     private final PgDb db;
     /** 内存态兜底：id -> 作品。仅在 {@code db == null} 时使用。 */
@@ -60,8 +60,7 @@ public final class WorkStore {
             memory.put(w.id, w);
             return true;
         }
-        String sql = "INSERT INTO \"t_work\" (" + COLUMNS + ") VALUES ("
-                + "?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+        String sql = insertSql();
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             bindRow(ps, w);
@@ -70,6 +69,38 @@ public final class WorkStore {
             // 唯一索引冲突（同一张回忆卡重复发布）在这里落地。调用方靠返回 false 判，
             // 🔴 不要把异常往上抛成 500：那是用户重复点了一下发布，不是服务器坏了。
             log.warn("插入作品失败 id={} sourceCardId={}: {}", w.id, w.sourceCardId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 复用凭证与作品创建同事务。消费失败则不落作品。
+     */
+    public boolean insertConsumingEvidence(Work w, WorkReviewEvidenceStore evidence, long evidenceId) {
+        if (evidence == null) {
+            return false;
+        }
+        if (!persistent()) {
+            synchronized (evidence.lock()) {
+                if (!evidence.tryConsume(evidenceId, w.id)) {
+                    return false;
+                }
+                memory.put(w.id, w);
+                return true;
+            }
+        }
+        try {
+            return db.inTransaction(c -> {
+                if (!evidence.tryConsume(c, evidenceId, w.id)) {
+                    return false;
+                }
+                try (PreparedStatement ps = c.prepareStatement(insertSql())) {
+                    bindRow(ps, w);
+                    return ps.executeUpdate() > 0;
+                }
+            });
+        } catch (SQLException e) {
+            log.warn("插入作品并消费凭证失败 id={} evidenceId={}: {}", w.id, evidenceId, e.getMessage());
             return false;
         }
     }
@@ -351,6 +382,8 @@ public final class WorkStore {
         w.submittedContentHash = orEmpty(rs.getString("submittedContentHash"));
         w.lastModerationId = nullableLong(rs, "lastModerationId");
         w.resubmitIdempotencyKey = rs.getString("resubmitIdempotencyKey");
+        w.reviewEvidenceId = nullableLong(rs, "reviewEvidenceId");
+        w.reviewMode = orEmpty(rs.getString("reviewMode"));
         return w;
     }
 
@@ -384,7 +417,14 @@ public final class WorkStore {
         ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
         ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
         setNullableLong(ps, i++, w.lastModerationId);
-        ps.setString(i, w.resubmitIdempotencyKey);
+        ps.setString(i++, w.resubmitIdempotencyKey);
+        setNullableLong(ps, i++, w.reviewEvidenceId);
+        ps.setString(i, w.reviewMode == null ? "" : w.reviewMode);
+    }
+
+    private static String insertSql() {
+        return "INSERT INTO \"t_work\" (" + COLUMNS + ") VALUES ("
+                + "?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
     }
 
     private static Long nullableLong(ResultSet rs, String col) throws SQLException {

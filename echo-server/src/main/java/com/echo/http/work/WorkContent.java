@@ -29,6 +29,20 @@ public final class WorkContent {
     }
 
     /**
+     * 公开审核比对用。宽高时长和可见范围不进这份哈希：
+     * 它们是呈现/闸门，不改变「这份内容和凭证审过的是不是同一份」。
+     */
+    public static String reviewHash(Work work) {
+        return sha256(String.join("\n",
+                nz(work.mediaType),
+                nz(work.mediaKey),
+                nz(work.posterKey),
+                nz(work.title),
+                nz(work.body),
+                String.valueOf(work.aiGenerated)));
+    }
+
+    /**
      * 相对上次送审内容：没改就停在已送审版本，改了就只升一档，不每次保存都 +1。
      */
     public static void refreshDraftVersion(Work work) {

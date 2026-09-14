@@ -5,6 +5,10 @@ import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkContent;
+import com.echo.http.work.WorkReviewDecision;
+import com.echo.http.work.WorkReviewEvidence;
+import com.echo.http.work.WorkReviewEvidenceStore;
+import com.echo.http.work.WorkReviewReuse;
 import com.echo.http.work.WorkStore;
 import com.echo.http.work.WorkSubmissionSlot;
 import com.echo.http.work.WorkView;
@@ -34,7 +38,9 @@ import java.util.Map;
  * 合并之后，作者按下发布的那一刻内容就已经在广场上，审核变成事后补救，
  * 而事后补救意味着<b>总有一段时间违规内容是可见的</b>。</p>
  *
- * <p>所以发布接口的成功回执是「已提交」而不是「已发布」，文案上也不要写成后者。</p>
+ * <p>所以发布接口的成功回执默认是「已提交」而不是「已发布」。例外只有一条：
+ * 来路卡原样、公开审核凭证有效时可以直接公开（{@code reviewMode=reused}），
+ * 那是复用已有结论，不是跳过审核。</p>
  */
 @Slf4j
 public final class WorksApi {
@@ -58,6 +64,7 @@ public final class WorksApi {
     private BlockService blockService;
     /** 卡归属。从回忆卡发布时判这张卡是不是本人的。 */
     private com.echo.http.store.ModerationStore cards;
+    private WorkReviewEvidenceStore reviewEvidence = new WorkReviewEvidenceStore(null);
 
     public WorksApi(WorkStore store, EchoStore accounts, IStorage storage,
                     com.echo.http.work.ResourceStore resources,
@@ -76,6 +83,10 @@ public final class WorksApi {
 
     public void setCardStore(com.echo.http.store.ModerationStore cards) {
         this.cards = cards;
+    }
+
+    public void setReviewEvidenceStore(WorkReviewEvidenceStore reviewEvidence) {
+        this.reviewEvidence = reviewEvidence == null ? new WorkReviewEvidenceStore(null) : reviewEvidence;
     }
 
     public void register(Router r) {
@@ -109,6 +120,8 @@ public final class WorksApi {
                     Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
         }
         JsonObject b = ctx.body();
+        Long sourceCardId = parseNullableId(Json.getString(b, "sourceCardId", ""));
+        Long reviewEvidenceId = parseNullableId(Json.getString(b, "reviewEvidenceId", ""));
 
         String mediaType = Json.getString(b, "mediaType", Work.MediaType.IMAGE);
         if (!Work.MediaType.IMAGE.equals(mediaType) && !Work.MediaType.VIDEO.equals(mediaType)) {
@@ -125,6 +138,9 @@ public final class WorksApi {
         //    但不需要猜——作品瀑布把完整直链下发给任何持游客 token 的人（同上 E5）。
         //    统一回 400 而不区分「不存在 / 不是你的」，区分开来等于确认这个 key 存在。
         if (!resources.ownedBy(mediaKey, me)) {
+            if (sourceCardId != null) {
+                throw publishRefused("resource_unavailable");
+            }
             throw new ApiException(ApiException.BAD_PARAM, "这份素材找不到了，重新选一次好吗？",
                     "mediaKey not owned by " + me);
         }
@@ -139,6 +155,9 @@ public final class WorksApi {
         }
         // 首帧也要判归属，否则封面这条路径就是 E4 的一个漏口。
         if (video && !resources.ownedBy(posterKey, me)) {
+            if (sourceCardId != null) {
+                throw publishRefused("resource_unavailable");
+            }
             throw new ApiException(ApiException.BAD_PARAM, "封面对不上，重新生成一下？",
                     "posterKey not owned by " + me);
         }
@@ -160,7 +179,7 @@ public final class WorksApi {
                     "bad visibility: " + visibility);
         }
 
-        Long sourceCardId = parseNullableId(Json.getString(b, "sourceCardId", ""));
+        com.echo.http.model.ModerationModels.MemoryCard card = null;
         // 🔴 判重之前先判归属。publishedFromCard 只回答「这张卡发过没有」，
         //    它<b>不</b>回答「这张卡是不是你的」——两个问题长得像，答错一个
         //    就等于允许把别人的回忆卡发成自己的作品（SPEC-security §4.14 E4 相关项）。
@@ -170,10 +189,12 @@ public final class WorksApi {
                 throw new ApiException(ApiException.SERVER_ERROR, "现在发不了，稍后再试？",
                         "card store not wired");
             }
-            var card = cards.card(sourceCardId);
-            if (card == null || card.ownerId != me) {
-                throw new ApiException(ApiException.BAD_PARAM, "这张卡找不到了。",
-                        "card " + sourceCardId + " not owned by " + me);
+            card = cards.card(sourceCardId);
+            if (card == null || card.deletedAt != null) {
+                throw publishRefused("source_unavailable");
+            }
+            if (card.ownerId != me) {
+                throw publishRefused("owner_mismatch");
             }
         }
         if (sourceCardId != null && store.publishedFromCard(sourceCardId)) {
@@ -198,8 +219,6 @@ public final class WorksApi {
         w.body = body;
         w.topicIdsJson = "[]";
         w.visibility = visibility;
-        // 🔴 pending 不是 public：见类注释的 OM3
-        w.status = Work.Status.PENDING;
         w.originType = Work.OriginType.USER;
         w.aiGenerated = Json.getBool(b, "aiGenerated", false);
         w.createdAt = now;
@@ -212,17 +231,42 @@ public final class WorksApi {
 
         inspectText(title, body);
 
-        if (!store.insert(w)) {
+        WorkReviewEvidence evidence = reviewEvidenceId != null
+                ? reviewEvidence.byId(reviewEvidenceId)
+                : (sourceCardId == null ? null : reviewEvidence.reusableByCard(sourceCardId));
+        WorkReviewDecision decision = WorkReviewReuse.decide(w, card, evidence, now);
+        if (decision.hardFail) {
+            throw publishRefused(decision.reasonCode);
+        }
+        w.status = decision.status;
+        w.reviewMode = decision.reviewMode;
+        if (WorkReviewDecision.MODE_REUSED.equals(decision.reviewMode)) {
+            w.reviewedAt = now;
+            w.reviewEvidenceId = decision.evidence.reviewEvidenceId;
+            if (!store.insertConsumingEvidence(w, reviewEvidence, decision.evidence.reviewEvidenceId)) {
+                throw publishRefused("evidence_consumed");
+            }
+        } else if (!store.insert(w)) {
             throw new ApiException(ApiException.BAD_PARAM, "没能发出去，再试一次？",
                     "insert failed for work " + w.id);
         }
-        log.info("[works] 发布 id={} authorId={} mediaType={} fromCard={} ai={}",
-                w.id, me, mediaType, sourceCardId, w.aiGenerated);
+        log.info("[works] 发布 id={} authorId={} mediaType={} fromCard={} ai={} reviewMode={} reason={}",
+                w.id, me, mediaType, sourceCardId, w.aiGenerated, w.reviewMode, decision.reasonCode);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("work", WorkView.detail(w, storage, true));
-        // 🔴 文案是「已提交」不是「已发布」：审核还没过，广场上还看不到它
-        out.put("message", "已提交，过一会儿就能在广场看到它了。");
+        out.put("workId", String.valueOf(w.id));
+        out.put("status", w.status);
+        out.put("reviewMode", w.reviewMode);
+        out.put("reasonCode", decision.reasonCode);
+        out.put("contentVersion", w.contentVersion);
+        out.put("evidenceExpiresAt", evidence == null ? null : evidence.expiresAt);
+        out.put("currentModerationState", w.status);
+        out.put("capabilities", Map.of("submissionCapability", WorkSubmissionSlot.capability(store.occupyingWork(me))));
+        out.put("nextAction", WorkContent.nextAction(w));
+        out.put("message", WorkReviewDecision.MODE_REUSED.equals(w.reviewMode)
+                ? "已经在广场上了。"
+                : "已提交，过一会儿就能在广场看到它了。");
         return out;
     }
 
@@ -481,6 +525,15 @@ public final class WorksApi {
             throw new ApiException(ApiException.BAD_PARAM,
                     "这段话里有些词不太合适，改一改再发？", "safety gate rejected");
         }
+    }
+
+    private static ApiException publishRefused(String reason) {
+        return new ApiException(ApiException.RULE_FORBIDDEN,
+                WorkReviewReuse.hardFailMessage(reason),
+                reason,
+                Map.of("reviewMode", WorkReviewDecision.MODE_NONE,
+                        "workCreated", false,
+                        "retryable", false));
     }
 
     private static Map<String, Object> resubmitResult(Work w) {

@@ -28,6 +28,7 @@ import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
+import com.echo.http.work.WorkReviewEvidenceStore;
 import com.echo.http.work.WorkStore;
 import com.echo.http.onboarding.EchoOnboardingWindowPort;
 import com.echo.http.onboarding.ExecutorOnboardingGenerationPort;
@@ -174,6 +175,7 @@ public final class EchoHttpBootstrap {
                 safetyGate, idGenerator);
         worksApi.setBlockService(blockService);
         worksApi.setCardStore(moderationStore);
+        worksApi.setReviewEvidenceStore(new WorkReviewEvidenceStore(pgDb));
         worksApi.register(router);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
