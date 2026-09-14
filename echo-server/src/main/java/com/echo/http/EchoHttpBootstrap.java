@@ -55,10 +55,14 @@ import com.echo.infra.persistence.PgDb;
 import com.echo.infra.persistence.PgDbManager;
 import com.echo.infra.safety.ContentSafetyFactory;
 import com.echo.infra.safety.ContentSafetyGate;
+import com.echo.infra.imagegen.ImageGenClientFactory;
+import com.echo.infra.provenance.GeneratedMediaPublisher;
+import com.echo.infra.provenance.ProvenanceConfig;
 import com.echo.infra.storage.IStorage;
 import com.echo.infra.storage.StorageConfig;
 import com.echo.infra.storage.StorageFactory;
 import com.echo.infra.vision.IVisionClient;
+import com.echo.infra.vision.StorageImageRefResolver;
 import com.echo.infra.vision.VisionClientFactory;
 import com.echo.module.account.AccountService;
 import lombok.extern.slf4j.Slf4j;
@@ -240,7 +244,11 @@ public final class EchoHttpBootstrap {
         OnboardingApi onboarding = new OnboardingApi(
                 onboardingRepository,
                 accountId -> BindingGuard.isBound(store, accountId),
-                new ExecutorOnboardingGenerationPort(effectiveLlm, idGenerator, executor),
+                new ExecutorOnboardingGenerationPort(effectiveLlm, idGenerator, executor,
+                        ImageGenClientFactory.fromEnv(),
+                        new StorageImageRefResolver(storage),
+                        new GeneratedMediaPublisher(storage, ProvenanceConfig.fromEnv()),
+                        ProvenanceConfig.fromEnv()),
                 new EchoOnboardingWindowPort(store, idGenerator),
                 vision,
                 idGenerator);

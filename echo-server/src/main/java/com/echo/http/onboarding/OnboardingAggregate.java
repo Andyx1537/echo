@@ -106,6 +106,7 @@ public final class OnboardingAggregate {
         public String gradient;
         public String emoji;
         public String signature;
+        public String imageUrl;
     }
 
     public static final class Consent {
