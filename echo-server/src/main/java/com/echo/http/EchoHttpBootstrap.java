@@ -171,12 +171,15 @@ public final class EchoHttpBootstrap {
         // 素材归属由上传口与发布口共用一份，不要各造一个：两份实例在内存态下
         // 各持一张 Map，上传记在 A、发布查 B，校验会永远不通过。
         ResourceStore resourceStore = new ResourceStore(pgDb);
-        WorksApi worksApi = new WorksApi(new WorkStore(pgDb), store, storage, resourceStore,
+        WorkStore workStore = new WorkStore(pgDb);
+        WorksApi worksApi = new WorksApi(workStore, store, storage, resourceStore,
                 safetyGate, idGenerator);
         worksApi.setBlockService(blockService);
         worksApi.setCardStore(moderationStore);
         worksApi.setReviewEvidenceStore(new WorkReviewEvidenceStore(pgDb));
         worksApi.register(router);
+        api.setWorkStore(workStore);
+        api.setStorage(storage);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
         logGovernanceReadiness(capabilities, switches);

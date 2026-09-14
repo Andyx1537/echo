@@ -52,6 +52,7 @@ public final class WorkView {
         //    不是只在详情页给。所以这个键在列表面必须有，且不分作者视角
         m.put("aiGenerated", w.aiGenerated);
         m.put("fromCard", w.sourceCardId != null);
+        m.put("sourceType", w.sourceCardId != null ? "memory_card" : "user_upload");
         if (authorView) {
             m.put("status", w.status);
             m.put("visibility", w.visibility);
