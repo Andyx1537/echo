@@ -28,6 +28,7 @@ import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
+import com.echo.http.behavior.BehaviorEventStore;
 import com.echo.http.work.WorkCommentStore;
 import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkReviewEvidenceStore;
@@ -186,6 +187,7 @@ public final class EchoHttpBootstrap {
                 favoriteStore, store, storage, idGenerator);
         socialApi.setBlockService(blockService);
         socialApi.register(router);
+        new BehaviorApi(new BehaviorEventStore(pgDb), store, idGenerator).register(router);
         api.setWorkStore(workStore);
         api.setStorage(storage);
 
