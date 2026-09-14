@@ -4,6 +4,10 @@ import com.aengine.util.id.IDGenerator;
 import com.echo.http.behavior.BehaviorDictionary;
 import com.echo.http.behavior.BehaviorEvent;
 import com.echo.http.behavior.BehaviorEventStore;
+import com.echo.http.behavior.BehaviorLedger;
+import com.echo.http.behavior.ExplicitFeedback;
+import com.echo.http.behavior.ExplicitFeedbackStore;
+import com.echo.http.behavior.FeedbackDictionary;
 import com.echo.http.model.Models.AccountProfile;
 import com.echo.http.store.EchoStore;
 import com.google.gson.JsonArray;
@@ -25,15 +29,29 @@ public final class BehaviorApi {
     private final BehaviorEventStore events;
     private final EchoStore accounts;
     private final IDGenerator ids;
+    private final ExplicitFeedbackStore feedbacks;
+    private final BehaviorLedger ledger;
 
     public BehaviorApi(BehaviorEventStore events, EchoStore accounts, IDGenerator ids) {
+        this(events, accounts, ids, new ExplicitFeedbackStore(null), new BehaviorLedger(events, ids));
+    }
+
+    public BehaviorApi(BehaviorEventStore events, EchoStore accounts, IDGenerator ids,
+                       ExplicitFeedbackStore feedbacks, BehaviorLedger ledger) {
         this.events = events;
         this.accounts = accounts;
         this.ids = ids;
+        this.feedbacks = feedbacks;
+        this.ledger = ledger;
+    }
+
+    public BehaviorLedger ledger() {
+        return ledger;
     }
 
     public void register(Router r) {
         r.add("POST", "/behavior-events/batch", this::ingest);
+        r.add("POST", "/me/explicit-feedback", this::submitFeedback);
     }
 
     private Object ingest(RequestContext ctx) {
@@ -59,6 +77,59 @@ public final class BehaviorApi {
             results.add(rejected(Json.getString(extra, "idempotencyKey", ""), BehaviorDictionary.REJECT_UNKNOWN));
         }
         return Map.of("results", results);
+    }
+
+    private Object submitFeedback(RequestContext ctx) {
+        long accountId = ctx.accountId();
+        if (accountId <= 0) {
+            throw new ApiException(ApiException.UNAUTHORIZED, "先让我认出你，再记下这一步。", "missing account");
+        }
+        JsonObject body = ctx.body() == null ? new JsonObject() : ctx.body();
+        String scope = Json.requireString(body, "scope");
+        String targetType = Json.requireString(body, "targetType");
+        String targetId = Json.requireString(body, "targetId");
+        String question = Json.requireString(body, "questionCode");
+        String answer = Json.requireString(body, "answerCode");
+        int version = Json.getInt(body, "answerVersion", 0);
+        String surface = Json.requireString(body, "sourceSurface");
+        String reason = FeedbackDictionary.reject(scope, targetType, surface, question, answer, version);
+        if (reason != null) {
+            throw new ApiException(ApiException.BAD_PARAM, "这个选择我这边还认不下来。", reason);
+        }
+        ExplicitFeedback current = feedbacks.active(accountId, scope, question, targetId);
+        if (current != null && current.answerCode.equals(answer) && current.answerVersion == version) {
+            Map<String, Object> same = new LinkedHashMap<>();
+            same.put("feedbackId", current.feedbackId);
+            same.put("status", current.status);
+            same.put("supersedesId", current.supersedesId);
+            return same;
+        }
+        ExplicitFeedback row = new ExplicitFeedback();
+        row.feedbackId = String.valueOf(ids.nextId());
+        row.accountId = accountId;
+        row.scope = scope;
+        row.targetType = targetType;
+        row.targetId = targetId;
+        row.questionCode = question;
+        row.answerCode = answer;
+        row.answerVersion = version;
+        row.sourceSurface = surface;
+        row.occurredAt = System.currentTimeMillis();
+        if (current != null) {
+            current.status = ExplicitFeedback.SUPERSEDED;
+            feedbacks.put(current);
+            row.supersedesId = current.feedbackId;
+        }
+        feedbacks.put(row);
+        ledger.explicitFeedback(accountId, current != null, row.feedbackId);
+        if ("less_like_this".equals(question)) {
+            ledger.lessLikeThisChanged(accountId, targetId);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("feedbackId", row.feedbackId);
+        out.put("status", row.status);
+        out.put("supersedesId", row.supersedesId);
+        return out;
     }
 
     private Map<String, Object> acceptOne(long accountId, JsonObject raw) {

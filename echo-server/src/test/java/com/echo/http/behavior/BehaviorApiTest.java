@@ -22,6 +22,8 @@ class BehaviorApiTest {
     private final IDGenerator ids = new IDGenerator(41);
     private final InMemoryEchoStore accounts = new InMemoryEchoStore();
     private final BehaviorEventStore store = new BehaviorEventStore(null);
+    private final ExplicitFeedbackStore feedbacks = new ExplicitFeedbackStore(null);
+    private BehaviorApi api;
     private Router router;
     private long guestId;
     private long boundId;
@@ -33,7 +35,8 @@ class BehaviorApiTest {
         put(guestId, true, "游客");
         put(boundId, false, "路过的人");
         router = new Router();
-        new BehaviorApi(store, accounts, ids).register(router);
+        api = new BehaviorApi(store, accounts, ids, feedbacks, new BehaviorLedger(store, ids));
+        api.register(router);
     }
 
     @Test
@@ -89,12 +92,66 @@ class BehaviorApiTest {
     }
 
     @Test
+    void explicitFeedbackKeepsHistoryOnChange() throws Exception {
+        Map<String, Object> first = postFeedback(boundId, "looks_like_it");
+        assertThat(first.get("status")).isEqualTo("active");
+        assertThat(first.get("supersedesId")).isNull();
+        Map<String, Object> again = postFeedback(boundId, "looks_like_it");
+        assertThat(again.get("feedbackId")).isEqualTo(first.get("feedbackId"));
+        Map<String, Object> changed = postFeedback(boundId, "not_like_it");
+        assertThat(changed.get("supersedesId")).isEqualTo(first.get("feedbackId"));
+        assertThat(feedbacks.ofAccount(boundId)).hasSize(2);
+        assertThat(feedbacks.active(boundId, "private_generation", "likeness", "gen-1").answerCode)
+                .isEqualTo("not_like_it");
+        assertThat(store.ofAccount(boundId))
+                .extracting(e -> e.eventName)
+                .contains("explicit_feedback_submitted", "explicit_feedback_changed");
+    }
+
+    @Test
+    void unknownFeedbackIsRejectedAndBindingIsServerOnly() throws Exception {
+        JsonObject bad = feedbackBody("looks_like_it");
+        bad.addProperty("questionCode", "how_old");
+        assertThatThrownBy(() -> call("POST", "/me/explicit-feedback", boundId, bad))
+                .isInstanceOf(ApiException.class)
+                .extracting(e -> ((ApiException) e).detail())
+                .isEqualTo(BehaviorDictionary.REJECT_UNKNOWN);
+        api.ledger().bindingCompleted(boundId);
+        api.ledger().bindingCompleted(boundId);
+        assertThat(store.ofAccount(boundId)).extracting(e -> e.eventName)
+                .containsOnly("onboarding_binding_completed");
+    }
+
+    @Test
     void missingAccountIsRejectedAsWholeRequest() {
         JsonObject event = questionAnswered("no-account");
         assertThatThrownBy(() -> post(0, List.of(event)))
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).code())
                 .isEqualTo(ApiException.UNAUTHORIZED);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> postFeedback(long viewer, String answer) throws Exception {
+        return (Map<String, Object>) call("POST", "/me/explicit-feedback", viewer, feedbackBody(answer));
+    }
+
+    private Object call(String method, String path, long viewer, JsonObject body) throws Exception {
+        Router.Match match = router.match(method, path);
+        assertThat(match).as("%s %s", method, path).isNotNull();
+        return match.handle(new RequestContext(method, Map.of(), Map.of(), body, viewer, Map.of()));
+    }
+
+    private static JsonObject feedbackBody(String answer) {
+        JsonObject body = new JsonObject();
+        body.addProperty("scope", "private_generation");
+        body.addProperty("targetType", "generation_result");
+        body.addProperty("targetId", "gen-1");
+        body.addProperty("questionCode", "likeness");
+        body.addProperty("answerCode", answer);
+        body.addProperty("answerVersion", 1);
+        body.addProperty("sourceSurface", "first_generation");
+        return body;
     }
 
     @SuppressWarnings("unchecked")

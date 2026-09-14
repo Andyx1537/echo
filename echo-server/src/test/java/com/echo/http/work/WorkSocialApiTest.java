@@ -7,6 +7,8 @@ import com.echo.http.Router;
 import com.echo.http.WorkSocialApi;
 import com.echo.http.WorksApi;
 import com.echo.http.model.Models.AccountProfile;
+import com.echo.http.behavior.BehaviorEventStore;
+import com.echo.http.behavior.BehaviorLedger;
 import com.echo.http.store.InMemoryEchoStore;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +26,7 @@ class WorkSocialApiTest {
     private final WorkStore works = new WorkStore(null);
     private final WorkCommentStore comments = new WorkCommentStore(null);
     private final WorkFavoriteStore favorites = new WorkFavoriteStore(null);
+    private final BehaviorEventStore behaviors = new BehaviorEventStore(null);
     private Router router;
     private long authorId;
     private long guestId;
@@ -44,6 +47,7 @@ class WorkSocialApiTest {
         WorksApi worksApi = new WorksApi(works, accounts, null, new ResourceStore(null), null, ids);
         worksApi.setFavoriteStore(favorites);
         WorkSocialApi social = new WorkSocialApi(works, comments, favorites, accounts, null, ids);
+        social.setBehaviorLedger(new BehaviorLedger(behaviors, ids));
         router = new Router();
         worksApi.register(router);
         social.register(router);
@@ -115,6 +119,11 @@ class WorkSocialApiTest {
         Map<String, Object> mine = get(boundId, "/me/favorites");
         assertThat(items(mine)).extracting(item -> item.get("id")).contains(String.valueOf(workId));
         assertThat(items(mine).get(0)).doesNotContainKey("favoriteCount");
+        put(boundId, "/works/" + workId + "/favorite");
+        assertThat(behaviors.ofAccount(boundId)).hasSize(1);
+        assertThat(behaviors.ofAccount(boundId).get(0).eventName).isEqualTo("work_favorite_changed");
+        delete(boundId, "/works/" + workId + "/favorite");
+        assertThat(behaviors.ofAccount(boundId)).hasSize(2);
     }
 
     @SuppressWarnings("unchecked")

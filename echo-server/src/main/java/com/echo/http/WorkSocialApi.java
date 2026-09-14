@@ -7,6 +7,7 @@ import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkComment;
 import com.echo.http.work.WorkCommentStore;
+import com.echo.http.behavior.BehaviorLedger;
 import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkStore;
 import com.echo.http.work.WorkView;
@@ -39,6 +40,7 @@ public final class WorkSocialApi {
     private final IDGenerator ids;
     private final IStorage storage;
     private BlockService blocks;
+    private BehaviorLedger ledger;
     private final Map<String, Idempotent> idempotency = new ConcurrentHashMap<>();
 
     public WorkSocialApi(WorkStore works, WorkCommentStore comments, WorkFavoriteStore favorites,
@@ -53,6 +55,10 @@ public final class WorkSocialApi {
 
     public void setBlockService(BlockService blocks) {
         this.blocks = blocks;
+    }
+
+    public void setBehaviorLedger(BehaviorLedger ledger) {
+        this.ledger = ledger;
     }
 
     public void register(Router r) {
@@ -235,14 +241,22 @@ public final class WorkSocialApi {
     private Object favorite(RequestContext ctx) {
         long me = BindingGuard.requireBound(accounts, ctx);
         Work work = visibleWork(ctx, parseId(ctx.path("workId")));
+        boolean first = !favorites.favorited(me, work.id);
         favorites.put(me, work.id, now());
+        if (first && ledger != null) {
+            ledger.favoriteChanged(me, work.id, true);
+        }
         return Map.of("workId", String.valueOf(work.id), "favorited", true);
     }
 
     private Object unfavorite(RequestContext ctx) {
         long me = BindingGuard.requireBound(accounts, ctx);
         long workId = parseId(ctx.path("workId"));
+        boolean was = favorites.favorited(me, workId);
         favorites.remove(me, workId);
+        if (was && ledger != null) {
+            ledger.favoriteChanged(me, workId, false);
+        }
         return Map.of("workId", String.valueOf(workId), "favorited", false);
     }
 

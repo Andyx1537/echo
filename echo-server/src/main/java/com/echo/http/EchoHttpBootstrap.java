@@ -29,6 +29,8 @@ import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
 import com.echo.http.behavior.BehaviorEventStore;
+import com.echo.http.behavior.BehaviorLedger;
+import com.echo.http.behavior.ExplicitFeedbackStore;
 import com.echo.http.work.WorkCommentStore;
 import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkReviewEvidenceStore;
@@ -186,8 +188,12 @@ public final class EchoHttpBootstrap {
         WorkSocialApi socialApi = new WorkSocialApi(workStore, new WorkCommentStore(pgDb),
                 favoriteStore, store, storage, idGenerator);
         socialApi.setBlockService(blockService);
+        BehaviorEventStore behaviorEvents = new BehaviorEventStore(pgDb);
+        BehaviorLedger behaviorLedger = new BehaviorLedger(behaviorEvents, idGenerator);
+        socialApi.setBehaviorLedger(behaviorLedger);
         socialApi.register(router);
-        new BehaviorApi(new BehaviorEventStore(pgDb), store, idGenerator).register(router);
+        new BehaviorApi(behaviorEvents, store, idGenerator,
+                new ExplicitFeedbackStore(pgDb), behaviorLedger).register(router);
         api.setWorkStore(workStore);
         api.setStorage(storage);
 
@@ -251,7 +257,9 @@ public final class EchoHttpBootstrap {
                         return session != null && session.accountId == accountId
                                 && "ready_to_bind".equals(session.status);
                     }, Clock.systemUTC());
-            new AuthApi(auth).register(router);
+            AuthApi authApi = new AuthApi(auth);
+            authApi.setBehaviorLedger(behaviorLedger);
+            authApi.register(router);
             sessionAuthenticator = auth;
         } else {
             AuthApi.registerUnavailable(router);
