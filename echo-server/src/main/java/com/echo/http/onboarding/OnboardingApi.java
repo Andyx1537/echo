@@ -64,6 +64,15 @@ public final class OnboardingApi {
         router.add("DELETE", "/pet/onboarding/:id", this::abandon);
     }
 
+    /** Process restart cannot resume in-memory jobs; close them as a visible failure. */
+    public int recoverInterruptedJobs() {
+        int recovered = 0;
+        for (String id : repository.findInterruptedIds()) {
+            if (repository.mutateSystem(id, OnboardingApi::failInterruptedJob)) recovered++;
+        }
+        return recovered;
+    }
+
     private Object create(RequestContext ctx) {
         String key = requireKey(ctx);
         JsonObject body = ctx.body();
@@ -398,13 +407,7 @@ public final class OnboardingApi {
                                     Throwable failure, boolean refine) {
         repository.mutateSystem(id, s -> {
             if (s.generationJob == null || !jobId.equals(s.generationJob.jobId)) return false;
-            if (failure != null) {
-                s.lastOperation = refine ? "refine_failed" : "generate_failed";
-                s.status = refine ? "candidate_ready" : "ready_to_generate";
-                s.currentStep = refine ? "candidate_select" : "generate";
-                s.generationJob = null;
-                return true;
-            }
+            if (failure != null) return failInterruptedJob(s);
             s.candidates.clear();
             s.candidates.addAll(candidates);
             s.lastOperation = "none";
@@ -480,6 +483,16 @@ public final class OnboardingApi {
         a.safetyDecision = "pending_provider_check";
         a.createdAt = System.currentTimeMillis();
         return a;
+    }
+
+    private static boolean failInterruptedJob(OnboardingAggregate s) {
+        if (!"generating".equals(s.status) && !"refining".equals(s.status)) return false;
+        boolean refine = "refining".equals(s.status);
+        s.lastOperation = refine ? "refine_failed" : "generate_failed";
+        s.status = refine ? "candidate_ready" : "ready_to_generate";
+        s.currentStep = refine ? "candidate_select" : "generate";
+        s.generationJob = null;
+        return true;
     }
 
     private static OnboardingAggregate.Job job(String id) {

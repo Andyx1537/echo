@@ -295,6 +295,35 @@ class OnboardingApiTest {
     }
 
     @Test
+    void recoverInterruptedJobsMarksLostGenerateAndRefineAsFailed() throws Exception {
+        OnboardingGenerationPort hang = (jobId, anchor, adjustment, completion) -> { };
+        OnboardingApi hanging = new OnboardingApi(repository, id -> !accounts.profile(id).guest,
+                hang, new EchoOnboardingWindowPort(accounts, ids), new StubVisionClient(), ids);
+
+        String refineId = readyWithCandidate();
+        String generateId = readyToBind("create-hang-generate");
+        callWithApi(hanging, "POST", "/pet/onboarding/" + generateId + "/generate",
+                body("expectedSessionVersion", repository.find(generateId).sessionVersion), "hang-generate");
+        assertThat(repository.find(generateId).status).isEqualTo("generating");
+
+        callWithApi(hanging, "POST", "/pet/onboarding/" + refineId + "/refine",
+                body("candidateId", repository.find(refineId).candidates.getFirst().candidateId,
+                        "expectedSessionVersion", repository.find(refineId).sessionVersion), "hang-refine");
+        assertThat(repository.find(refineId).status).isEqualTo("refining");
+
+        assertThat(hanging.recoverInterruptedJobs()).isEqualTo(2);
+        OnboardingAggregate generated = repository.find(generateId);
+        assertThat(generated.status).isEqualTo("ready_to_generate");
+        assertThat(generated.lastOperation).isEqualTo("generate_failed");
+        assertThat(generated.generationJob).isNull();
+        OnboardingAggregate refined = repository.find(refineId);
+        assertThat(refined.status).isEqualTo("candidate_ready");
+        assertThat(refined.lastOperation).isEqualTo("refine_failed");
+        assertThat(refined.generationJob).isNull();
+        assertThat(hanging.recoverInterruptedJobs()).isZero();
+    }
+
+    @Test
     void legacyRoutesCanReturnEndpointRetired() throws Exception {
         String before = System.getProperty("echo.onboarding.legacy.enabled");
         try {
@@ -324,7 +353,11 @@ class OnboardingApiTest {
     }
 
     private String readyToBind() throws Exception {
-        String id = (String) call("POST", "/pet/onboarding", new JsonObject(), "create-ready").get("onboardingId");
+        return readyToBind("create-ready");
+    }
+
+    private String readyToBind(String createKey) throws Exception {
+        String id = (String) call("POST", "/pet/onboarding", new JsonObject(), createKey).get("onboardingId");
         newApi().attachUploadedAsset(accountId, id, "asset-ready", 0,
                 "resource-ready", "image", "asset-fingerprint-ready");
         OnboardingAggregate s = repository.find(id);

@@ -5,6 +5,7 @@ import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
@@ -29,6 +30,14 @@ public final class InMemoryOnboardingRepository implements OnboardingRepository 
     public OnboardingAggregate find(String onboardingId) {
         OnboardingAggregate value = sessions.get(onboardingId);
         return value == null ? null : copy(value);
+    }
+
+    @Override
+    public List<String> findInterruptedIds() {
+        return sessions.values().stream()
+                .filter(value -> "generating".equals(value.status) || "refining".equals(value.status))
+                .map(value -> value.onboardingId)
+                .toList();
     }
 
     @Override

@@ -9,7 +9,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -52,6 +54,22 @@ public final class PgOnboardingRepository implements OnboardingRepository {
     public OnboardingAggregate find(String id) {
         try (Connection c = db.getConnection()) {
             return load(c, id, false);
+        } catch (SQLException e) {
+            throw storage(e);
+        }
+    }
+
+    @Override
+    public List<String> findInterruptedIds() {
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT \"onboardingId\" FROM \"t_onboarding_session\" "
+                             + "WHERE \"status\" IN ('generating','refining')")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                List<String> ids = new ArrayList<>();
+                while (rs.next()) ids.add(rs.getString(1));
+                return ids;
+            }
         } catch (SQLException e) {
             throw storage(e);
         }

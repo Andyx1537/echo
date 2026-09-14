@@ -2,6 +2,7 @@ package com.echo.http.onboarding;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -11,6 +12,8 @@ public interface OnboardingRepository {
     OnboardingAggregate create(OnboardingAggregate aggregate);
 
     OnboardingAggregate find(String onboardingId);
+
+    List<String> findInterruptedIds();
 
     Map<String, Object> replay(String onboardingId, String idempotencyKey, String requestHash);
 
