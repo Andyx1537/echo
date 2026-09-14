@@ -4,6 +4,7 @@ import com.echo.http.governance.BlockService;
 import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
+import com.echo.http.work.WorkContent;
 import com.echo.http.work.WorkStore;
 import com.echo.http.work.WorkSubmissionSlot;
 import com.echo.http.work.WorkView;
@@ -82,6 +83,8 @@ public final class WorksApi {
         r.add("GET", "/works", this::feed);
         r.add("GET", "/works/:workId", this::detail);
         r.add("GET", "/users/:userId/works", this::worksOfUser);
+        r.add("PUT", "/works/:workId/draft", this::saveDraft);
+        r.add("POST", "/works/:workId/resubmit", this::resubmit);
         r.add("DELETE", "/works/:workId", this::remove);
     }
 
@@ -202,16 +205,12 @@ public final class WorksApi {
         w.createdAt = now;
         w.updatedAt = now;
         w.publishedAt = now;
+        w.contentVersion = 1;
+        w.submittedContentVersion = 1;
+        w.contentHash = WorkContent.hash(w);
+        w.submittedContentHash = w.contentHash;
 
-        // 文本安全闸。🔴 命中不是静默成功——发布是作者的主动创作，
-        //    悄悄吞掉会让他对着一个永远不出现的作品干等
-        if (safetyGate != null) {
-            OutputSafetyGate.Verdict verdict = safetyGate.inspectUserText(title + "\n" + body);
-            if (!verdict.passed()) {
-                throw new ApiException(ApiException.BAD_PARAM,
-                        "这段话里有些词不太合适，改一改再发？", "safety gate rejected");
-            }
-        }
+        inspectText(title, body);
 
         if (!store.insert(w)) {
             throw new ApiException(ApiException.BAD_PARAM, "没能发出去，再试一次？",
@@ -281,6 +280,98 @@ public final class WorksApi {
         return Map.of("work", WorkView.detail(w, storage, self));
     }
 
+    /**
+     * {@code PUT /works/:workId/draft} —— 驳回后改内容。主状态仍是 rejected。
+     */
+    private Object saveDraft(RequestContext ctx) {
+        long me = BindingGuard.requireBound(accounts, ctx);
+        Work w = requireOwnWork(me, parseId(ctx.path("workId")));
+        if (Work.Status.TAKENDOWN.equals(w.status)) {
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "这条已经不在了，不能从这里改完再发。", "work_takendown");
+        }
+        if (!Work.Status.REJECTED.equals(w.status)) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "现在还不能改这一条。", "work_not_rejected");
+        }
+        applyAuthorContent(ctx.body(), w, me);
+        inspectText(w.title, w.body);
+        WorkContent.refreshDraftVersion(w);
+        w.updatedAt = System.currentTimeMillis();
+        if (!store.update(w)) {
+            throw new ApiException(ApiException.BAD_PARAM, "没能存下来，再试一次？",
+                    "draft update failed for work " + w.id);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("work", WorkView.detail(w, storage, true));
+        out.put("contentVersion", w.contentVersion);
+        out.put("status", w.status);
+        return out;
+    }
+
+    /**
+     * {@code POST /works/:workId/resubmit} —— 把当前草稿再送审。成功才占投稿名额。
+     */
+    private Object resubmit(RequestContext ctx) {
+        long me = BindingGuard.requireBound(accounts, ctx);
+        JsonObject b = ctx.body();
+        Work w = requireOwnWork(me, parseId(ctx.path("workId")));
+        if (Work.Status.TAKENDOWN.equals(w.status)) {
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "这条已经不在了，不能从这里再发。", "work_takendown");
+        }
+        String key = Json.getString(b, "idempotencyKey", "");
+        if (key.isBlank()) {
+            String header = ctx.header("idempotency-key");
+            key = header == null ? "" : header.trim();
+        }
+        if (key.isBlank()) {
+            throw new ApiException(ApiException.BAD_PARAM, "再点一次就好。", "missing idempotencyKey");
+        }
+        if (key.equals(w.resubmitIdempotencyKey) && w.lastModerationId != null
+                && Work.Status.PENDING.equals(w.status)) {
+            return resubmitResult(w);
+        }
+        if (!Work.Status.REJECTED.equals(w.status)) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "现在还不能再提这一条。", "work_not_rejected");
+        }
+        int expectedVersion = Json.getInt(b, "contentVersion", -1);
+        if (expectedVersion != w.contentVersion) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "先刷新一下再提。", "work_version_conflict");
+        }
+        Work occupying = store.occupyingWork(me);
+        if (occupying != null && occupying.id != w.id) {
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "还有一条作品正在处理，先等它走完再发新的。",
+                    "submission_slot_occupied",
+                    Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
+        }
+        inspectText(w.title, w.body);
+        if (!resources.ownedBy(w.mediaKey, me)) {
+            throw new ApiException(ApiException.BAD_PARAM, "这份素材找不到了，重新选一次好吗？",
+                    "mediaKey not owned by " + me);
+        }
+        if (w.isVideo() && !resources.ownedBy(w.posterKey, me)) {
+            throw new ApiException(ApiException.BAD_PARAM, "封面对不上，重新生成一下？",
+                    "posterKey not owned by " + me);
+        }
+        long now = System.currentTimeMillis();
+        WorkContent.prepareResubmit(w);
+        w.lastModerationId = idGenerator.nextId();
+        w.resubmitIdempotencyKey = key;
+        w.updatedAt = now;
+        w.publishedAt = now;
+        if (!store.casResubmit(w, expectedVersion)) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "先刷新一下再提。", "work_version_conflict");
+        }
+        log.info("[works] 重提 id={} authorId={} contentVersion={} moderationId={}",
+                w.id, me, w.contentVersion, w.lastModerationId);
+        return resubmitResult(w);
+    }
+
     /** {@code DELETE /works/:workId} —— 作者删除自己的作品（软删）。 */
     private Object remove(RequestContext ctx) {
         long me = ctx.accountId();
@@ -296,6 +387,111 @@ public final class WorksApi {
     }
 
     // ============================================================== 内部
+
+    private Work requireOwnWork(long me, long id) {
+        Work w = store.byId(id);
+        if (w == null || w.authorId != me) {
+            throw new ApiException(ApiException.NOT_FOUND, "这个作品找不到了。",
+                    "work not found or not owned");
+        }
+        return w;
+    }
+
+    private void applyAuthorContent(JsonObject b, Work w, long me) {
+        if (b.has("mediaType") && !b.get("mediaType").isJsonNull()) {
+            String mediaType = Json.getString(b, "mediaType", w.mediaType);
+            if (!Work.MediaType.IMAGE.equals(mediaType) && !Work.MediaType.VIDEO.equals(mediaType)) {
+                throw new ApiException(ApiException.BAD_PARAM, "这种素材还支持不了呢。",
+                        "unsupported mediaType: " + mediaType);
+            }
+            w.mediaType = mediaType;
+        }
+        if (b.has("mediaKey") && !b.get("mediaKey").isJsonNull()) {
+            String mediaKey = Json.getString(b, "mediaKey", "").trim();
+            if (mediaKey.isEmpty()) {
+                throw new ApiException(ApiException.BAD_PARAM, "还没选素材呢。", "empty mediaKey");
+            }
+            if (!resources.ownedBy(mediaKey, me)) {
+                throw new ApiException(ApiException.BAD_PARAM, "这份素材找不到了，重新选一次好吗？",
+                        "mediaKey not owned by " + me);
+            }
+            w.mediaKey = mediaKey;
+        }
+        boolean video = w.isVideo();
+        if (b.has("posterKey") && !b.get("posterKey").isJsonNull()) {
+            String posterKey = Json.getString(b, "posterKey", "").trim();
+            if (video && posterKey.isEmpty()) {
+                throw new ApiException(ApiException.BAD_PARAM, "视频还没生成封面，稍等一下再发？",
+                        "video requires posterKey");
+            }
+            if (video && !resources.ownedBy(posterKey, me)) {
+                throw new ApiException(ApiException.BAD_PARAM, "封面对不上，重新生成一下？",
+                        "posterKey not owned by " + me);
+            }
+            w.posterKey = video ? posterKey : "";
+        } else if (video && (w.posterKey == null || w.posterKey.isBlank())) {
+            throw new ApiException(ApiException.BAD_PARAM, "视频还没生成封面，稍等一下再发？",
+                    "video requires posterKey");
+        }
+        if (b.has("durationMs") && !b.get("durationMs").isJsonNull()) {
+            int durationMs = Json.getInt(b, "durationMs", 0);
+            if (video && durationMs > MAX_DURATION_MS) {
+                throw new ApiException(ApiException.BAD_PARAM,
+                        "视频有点长了，" + (MAX_DURATION_MS / 60000) + " 分钟以内就好。",
+                        "duration too long: " + durationMs);
+            }
+            w.durationMs = video ? durationMs : 0;
+        }
+        if (b.has("width") && !b.get("width").isJsonNull()) {
+            w.width = Math.max(0, Json.getInt(b, "width", 0));
+        }
+        if (b.has("height") && !b.get("height").isJsonNull()) {
+            w.height = Math.max(0, Json.getInt(b, "height", 0));
+        }
+        if (b.has("title") && !b.get("title").isJsonNull()) {
+            String title = Json.getString(b, "title", "").trim();
+            requireWithin(title, MAX_TITLE_CHARS, "标题");
+            w.title = title;
+        }
+        if (b.has("body") && !b.get("body").isJsonNull()) {
+            String body = Json.getString(b, "body", "").trim();
+            requireWithin(body, MAX_BODY_CHARS, "正文");
+            w.body = body;
+        }
+        if (b.has("visibility") && !b.get("visibility").isJsonNull()) {
+            String visibility = Json.getString(b, "visibility", w.visibility);
+            if (!List.of("private", "friends", "public").contains(visibility)) {
+                throw new ApiException(ApiException.BAD_PARAM, "可见范围不太对。",
+                        "bad visibility: " + visibility);
+            }
+            w.visibility = visibility;
+        }
+        if (b.has("aiGenerated") && !b.get("aiGenerated").isJsonNull()) {
+            w.aiGenerated = Json.getBool(b, "aiGenerated", w.aiGenerated);
+        }
+    }
+
+    private void inspectText(String title, String body) {
+        if (safetyGate == null) {
+            return;
+        }
+        OutputSafetyGate.Verdict verdict = safetyGate.inspectUserText(
+                (title == null ? "" : title) + "\n" + (body == null ? "" : body));
+        if (!verdict.passed()) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "这段话里有些词不太合适，改一改再发？", "safety gate rejected");
+        }
+    }
+
+    private static Map<String, Object> resubmitResult(Work w) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("workId", String.valueOf(w.id));
+        out.put("contentVersion", w.contentVersion);
+        out.put("contentHash", w.contentHash);
+        out.put("status", w.status);
+        out.put("moderationId", String.valueOf(w.lastModerationId));
+        return out;
+    }
 
     private boolean hiddenBetween(long a, long b) {
         return blockService != null && blockService.hidden(a, b);

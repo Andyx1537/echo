@@ -56,6 +56,8 @@ public final class WorkView {
             m.put("status", w.status);
             m.put("visibility", w.visibility);
             m.put("sourceCardId", w.sourceCardId == null ? null : String.valueOf(w.sourceCardId));
+            m.put("contentVersion", w.contentVersion);
+            m.put("nextAction", WorkContent.nextAction(w));
         }
         return m;
     }

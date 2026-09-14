@@ -36,7 +36,9 @@ public final class WorkStore {
             + "\"mediaKey\",\"posterKey\",\"durationMs\",\"width\",\"height\",\"title\",\"body\","
             + "\"topicIds\",\"visibility\",\"status\",\"originType\",\"aiGenerated\","
             + "\"createdAt\",\"updatedAt\",\"publishedAt\",\"reviewedAt\","
-            + "\"deletedAt\",\"deletedBy\",\"deleteReason\"";
+            + "\"deletedAt\",\"deletedBy\",\"deleteReason\","
+            + "\"contentVersion\",\"submittedContentVersion\",\"contentHash\",\"submittedContentHash\","
+            + "\"lastModerationId\",\"resubmitIdempotencyKey\"";
 
     private final PgDb db;
     /** 内存态兜底：id -> 作品。仅在 {@code db == null} 时使用。 */
@@ -59,33 +61,10 @@ public final class WorkStore {
             return true;
         }
         String sql = "INSERT INTO \"t_work\" (" + COLUMNS + ") VALUES ("
-                + "?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?)";
+                + "?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            int i = 1;
-            ps.setLong(i++, w.id);
-            ps.setLong(i++, w.authorId);
-            setNullableLong(ps, i++, w.sourceCardId);
-            ps.setString(i++, w.mediaType);
-            ps.setString(i++, w.mediaKey);
-            ps.setString(i++, w.posterKey);
-            ps.setInt(i++, w.durationMs);
-            ps.setInt(i++, w.width);
-            ps.setInt(i++, w.height);
-            ps.setString(i++, w.title);
-            ps.setString(i++, w.body);
-            ps.setString(i++, w.topicIdsJson == null ? "[]" : w.topicIdsJson);
-            ps.setString(i++, w.visibility);
-            ps.setString(i++, w.status);
-            ps.setString(i++, w.originType);
-            ps.setBoolean(i++, w.aiGenerated);
-            ps.setLong(i++, w.createdAt);
-            ps.setLong(i++, w.updatedAt);
-            setNullableLong(ps, i++, w.publishedAt);
-            setNullableLong(ps, i++, w.reviewedAt);
-            setNullableLong(ps, i++, w.deletedAt);
-            setNullableLong(ps, i++, w.deletedBy);
-            ps.setString(i, w.deleteReason);
+            bindRow(ps, w);
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             // 唯一索引冲突（同一张回忆卡重复发布）在这里落地。调用方靠返回 false 判，
@@ -123,6 +102,105 @@ public final class WorkStore {
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             log.warn("软删作品失败 id={}: {}", id, e.getMessage());
+            return false;
+        }
+    }
+
+    /** 覆盖当前草稿或重提后的行。内存态改的是同一对象。 */
+    public boolean update(Work w) {
+        if (!persistent()) {
+            Work existing = memory.get(w.id);
+            if (existing == null || existing.isDeleted()) {
+                return false;
+            }
+            memory.put(w.id, w);
+            return true;
+        }
+        String sql = "UPDATE \"t_work\" SET \"mediaType\"=?,\"mediaKey\"=?,\"posterKey\"=?,"
+                + "\"durationMs\"=?,\"width\"=?,\"height\"=?,\"title\"=?,\"body\"=?,"
+                + "\"visibility\"=?,\"status\"=?,\"aiGenerated\"=?,\"updatedAt\"=?,"
+                + "\"contentVersion\"=?,\"submittedContentVersion\"=?,\"contentHash\"=?,"
+                + "\"submittedContentHash\"=?,\"lastModerationId\"=?,\"resubmitIdempotencyKey\"=?"
+                + " WHERE \"id\"=? AND \"deletedAt\" IS NULL";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, w.mediaType);
+            ps.setString(i++, w.mediaKey);
+            ps.setString(i++, w.posterKey);
+            ps.setInt(i++, w.durationMs);
+            ps.setInt(i++, w.width);
+            ps.setInt(i++, w.height);
+            ps.setString(i++, w.title);
+            ps.setString(i++, w.body);
+            ps.setString(i++, w.visibility);
+            ps.setString(i++, w.status);
+            ps.setBoolean(i++, w.aiGenerated);
+            ps.setLong(i++, w.updatedAt);
+            ps.setInt(i++, w.contentVersion);
+            ps.setInt(i++, w.submittedContentVersion);
+            ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
+            ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
+            setNullableLong(ps, i++, w.lastModerationId);
+            ps.setString(i++, w.resubmitIdempotencyKey);
+            ps.setLong(i, w.id);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            log.warn("更新作品失败 id={}: {}", w.id, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 驳回 → 待审。版本对不上或已经不是驳回则 0 行，调用方按冲突处理。
+     */
+    public boolean casResubmit(Work w, int expectedVersion) {
+        if (!persistent()) {
+            Work existing = memory.get(w.id);
+            if (existing == null || existing.isDeleted()) {
+                return false;
+            }
+            // 调用方先改同一份对象再 CAS：内存里 existing == w，不能再拿改后的 status 对 rejected。
+            if (existing != w && (!Work.Status.REJECTED.equals(existing.status)
+                    || existing.contentVersion != expectedVersion)) {
+                return false;
+            }
+            memory.put(w.id, w);
+            return true;
+        }
+        String sql = "UPDATE \"t_work\" SET \"mediaType\"=?,\"mediaKey\"=?,\"posterKey\"=?,"
+                + "\"durationMs\"=?,\"width\"=?,\"height\"=?,\"title\"=?,\"body\"=?,"
+                + "\"visibility\"=?,\"status\"=?,\"aiGenerated\"=?,\"updatedAt\"=?,"
+                + "\"contentVersion\"=?,\"submittedContentVersion\"=?,\"contentHash\"=?,"
+                + "\"submittedContentHash\"=?,\"lastModerationId\"=?,\"resubmitIdempotencyKey\"=?"
+                + " WHERE \"id\"=? AND \"deletedAt\" IS NULL AND \"status\"='rejected'"
+                + " AND \"contentVersion\"=?";
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, w.mediaType);
+            ps.setString(i++, w.mediaKey);
+            ps.setString(i++, w.posterKey);
+            ps.setInt(i++, w.durationMs);
+            ps.setInt(i++, w.width);
+            ps.setInt(i++, w.height);
+            ps.setString(i++, w.title);
+            ps.setString(i++, w.body);
+            ps.setString(i++, w.visibility);
+            ps.setString(i++, w.status);
+            ps.setBoolean(i++, w.aiGenerated);
+            ps.setLong(i++, w.updatedAt);
+            ps.setInt(i++, w.contentVersion);
+            ps.setInt(i++, w.submittedContentVersion);
+            ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
+            ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
+            setNullableLong(ps, i++, w.lastModerationId);
+            ps.setString(i++, w.resubmitIdempotencyKey);
+            ps.setLong(i++, w.id);
+            ps.setInt(i, expectedVersion);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            log.warn("重提作品失败 id={}: {}", w.id, e.getMessage());
             return false;
         }
     }
@@ -267,7 +345,46 @@ public final class WorkStore {
         w.deletedAt = nullableLong(rs, "deletedAt");
         w.deletedBy = nullableLong(rs, "deletedBy");
         w.deleteReason = rs.getString("deleteReason");
+        w.contentVersion = rs.getInt("contentVersion");
+        w.submittedContentVersion = rs.getInt("submittedContentVersion");
+        w.contentHash = orEmpty(rs.getString("contentHash"));
+        w.submittedContentHash = orEmpty(rs.getString("submittedContentHash"));
+        w.lastModerationId = nullableLong(rs, "lastModerationId");
+        w.resubmitIdempotencyKey = rs.getString("resubmitIdempotencyKey");
         return w;
+    }
+
+    private static void bindRow(PreparedStatement ps, Work w) throws SQLException {
+        int i = 1;
+        ps.setLong(i++, w.id);
+        ps.setLong(i++, w.authorId);
+        setNullableLong(ps, i++, w.sourceCardId);
+        ps.setString(i++, w.mediaType);
+        ps.setString(i++, w.mediaKey);
+        ps.setString(i++, w.posterKey);
+        ps.setInt(i++, w.durationMs);
+        ps.setInt(i++, w.width);
+        ps.setInt(i++, w.height);
+        ps.setString(i++, w.title);
+        ps.setString(i++, w.body);
+        ps.setString(i++, w.topicIdsJson == null ? "[]" : w.topicIdsJson);
+        ps.setString(i++, w.visibility);
+        ps.setString(i++, w.status);
+        ps.setString(i++, w.originType);
+        ps.setBoolean(i++, w.aiGenerated);
+        ps.setLong(i++, w.createdAt);
+        ps.setLong(i++, w.updatedAt);
+        setNullableLong(ps, i++, w.publishedAt);
+        setNullableLong(ps, i++, w.reviewedAt);
+        setNullableLong(ps, i++, w.deletedAt);
+        setNullableLong(ps, i++, w.deletedBy);
+        ps.setString(i++, w.deleteReason);
+        ps.setInt(i++, w.contentVersion);
+        ps.setInt(i++, w.submittedContentVersion);
+        ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
+        ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
+        setNullableLong(ps, i++, w.lastModerationId);
+        ps.setString(i, w.resubmitIdempotencyKey);
     }
 
     private static Long nullableLong(ResultSet rs, String col) throws SQLException {

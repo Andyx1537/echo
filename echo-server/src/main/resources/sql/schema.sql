@@ -1422,6 +1422,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_source_card"
 CREATE INDEX IF NOT EXISTS "t_work_idx_origin_reviewed"
     ON "t_work" ("originType", "reviewedAt") WHERE "reviewedAt" IS NOT NULL;
 
+-- 驳回重提：当前草稿版本与上次送审版本分开，不得覆盖旧审核版本。
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "contentVersion" integer NOT NULL DEFAULT 1;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "submittedContentVersion" integer NOT NULL DEFAULT 1;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "contentHash" varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "submittedContentHash" varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "lastModerationId" bigint;
+ALTER TABLE "t_work" ADD COLUMN IF NOT EXISTS "resubmitIdempotencyKey" varchar(128);
+
 -- ============================================================
 -- 素材归属（t_resource）
 -- ============================================================
@@ -1719,5 +1727,6 @@ VALUES (2026083101, 1788177600000),
        (2026090301, 1788418800000),
        (2026090601, 1788678000000),
        (2026090701, 1788764400000),
-       (2026090702, 1788768000000)
+       (2026090702, 1788768000000),
+       (2026091401, 1789372800000)
 ON CONFLICT ("version") DO NOTHING;
