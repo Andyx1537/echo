@@ -1746,6 +1746,48 @@ CREATE TABLE IF NOT EXISTS "t_onboarding_idempotency" (
 CREATE INDEX IF NOT EXISTS "t_onboarding_idempotency_idx_created"
     ON "t_onboarding_idempotency" ("createdAt");
 
+CREATE TABLE IF NOT EXISTS "t_work_comment" (
+    "id"               bigint       NOT NULL,
+    "workId"           bigint       NOT NULL,
+    "authorId"         bigint       NOT NULL,
+    "rootCommentId"    bigint,
+    "replyToCommentId" bigint,
+    "body"             text         NOT NULL,
+    "createdAt"        bigint       NOT NULL,
+    "updatedAt"        bigint       NOT NULL,
+    "displayState"     varchar(32)  NOT NULL DEFAULT 'visible',
+    "stateVersion"     integer      NOT NULL DEFAULT 1,
+    "deletedAt"        bigint,
+    "deletedBy"        bigint,
+    "deleteReason"     varchar(64),
+    PRIMARY KEY ("id"),
+    CONSTRAINT "t_work_comment_fk_work" FOREIGN KEY ("workId")
+        REFERENCES "t_work" ("id") ON DELETE RESTRICT,
+    CONSTRAINT "t_work_comment_ck_state" CHECK ("displayState" IN ('visible','hidden','owner_hidden'))
+);
+CREATE INDEX IF NOT EXISTS "t_work_comment_idx_work_root"
+    ON "t_work_comment" ("workId", "rootCommentId", "createdAt");
+
+CREATE TABLE IF NOT EXISTS "t_work_favorite" (
+    "accountId" bigint NOT NULL,
+    "workId"    bigint NOT NULL,
+    "createdAt" bigint NOT NULL,
+    PRIMARY KEY ("accountId", "workId"),
+    CONSTRAINT "t_work_favorite_fk_work" FOREIGN KEY ("workId")
+        REFERENCES "t_work" ("id") ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS "t_work_favorite_idx_account_time"
+    ON "t_work_favorite" ("accountId", "createdAt" DESC);
+
+CREATE TABLE IF NOT EXISTS "t_work_social_idempotency" (
+    "accountId"      bigint       NOT NULL,
+    "idempotencyKey" varchar(128) NOT NULL,
+    "requestHash"    varchar(64)  NOT NULL,
+    "responseJson"   text         NOT NULL,
+    "createdAt"      bigint       NOT NULL,
+    PRIMARY KEY ("accountId", "idempotencyKey")
+);
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
@@ -1755,5 +1797,6 @@ VALUES (2026083101, 1788177600000),
        (2026090701, 1788764400000),
        (2026090702, 1788768000000),
        (2026091401, 1789372800000),
-       (2026091402, 1789376400000)
+       (2026091402, 1789376400000),
+       (2026091403, 1789380000000)
 ON CONFLICT ("version") DO NOTHING;

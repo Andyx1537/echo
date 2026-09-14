@@ -5,6 +5,7 @@ import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkContent;
+import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkReviewDecision;
 import com.echo.http.work.WorkReviewEvidence;
 import com.echo.http.work.WorkReviewEvidenceStore;
@@ -65,6 +66,7 @@ public final class WorksApi {
     /** 卡归属。从回忆卡发布时判这张卡是不是本人的。 */
     private com.echo.http.store.ModerationStore cards;
     private WorkReviewEvidenceStore reviewEvidence = new WorkReviewEvidenceStore(null);
+    private WorkFavoriteStore favorites;
 
     public WorksApi(WorkStore store, EchoStore accounts, IStorage storage,
                     com.echo.http.work.ResourceStore resources,
@@ -87,6 +89,10 @@ public final class WorksApi {
 
     public void setReviewEvidenceStore(WorkReviewEvidenceStore reviewEvidence) {
         this.reviewEvidence = reviewEvidence == null ? new WorkReviewEvidenceStore(null) : reviewEvidence;
+    }
+
+    public void setFavoriteStore(WorkFavoriteStore favorites) {
+        this.favorites = favorites;
     }
 
     public void register(Router r) {
@@ -321,7 +327,11 @@ public final class WorksApi {
                         "work not visible to viewer");
             }
         }
-        return Map.of("work", WorkView.detail(w, storage, self));
+        Map<String, Object> view = WorkView.detail(w, storage, self);
+        if (favorites != null && BindingGuard.isBound(accounts, viewer)) {
+            view.put("favorited", favorites.favorited(viewer, w.id));
+        }
+        return Map.of("work", view);
     }
 
     /**

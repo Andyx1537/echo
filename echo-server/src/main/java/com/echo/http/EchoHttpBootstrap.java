@@ -28,6 +28,8 @@ import com.echo.http.store.ModerationStore;
 import com.echo.http.store.PgEchoStore;
 import com.echo.http.store.PgModerationStore;
 import com.echo.http.work.ResourceStore;
+import com.echo.http.work.WorkCommentStore;
+import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkReviewEvidenceStore;
 import com.echo.http.work.WorkStore;
 import com.echo.http.onboarding.EchoOnboardingWindowPort;
@@ -177,7 +179,13 @@ public final class EchoHttpBootstrap {
         worksApi.setBlockService(blockService);
         worksApi.setCardStore(moderationStore);
         worksApi.setReviewEvidenceStore(new WorkReviewEvidenceStore(pgDb));
+        WorkFavoriteStore favoriteStore = new WorkFavoriteStore(pgDb);
+        worksApi.setFavoriteStore(favoriteStore);
         worksApi.register(router);
+        WorkSocialApi socialApi = new WorkSocialApi(workStore, new WorkCommentStore(pgDb),
+                favoriteStore, store, storage, idGenerator);
+        socialApi.setBlockService(blockService);
+        socialApi.register(router);
         api.setWorkStore(workStore);
         api.setStorage(storage);
 

@@ -25,6 +25,8 @@ class SchemaContractTest {
             assertThat(sql).contains("(" + EchoDatabase.REQUIRED_SCHEMA_VERSION + ",");
             assertThat(sql).contains("USING hnsw (\"embedding\" vector_cosine_ops)");
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_public_review_evidence\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_work_comment\"");
+            assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_work_favorite\"");
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_behavior_event\"");
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_explicit_feedback\"");
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_user_hypothesis\"");
