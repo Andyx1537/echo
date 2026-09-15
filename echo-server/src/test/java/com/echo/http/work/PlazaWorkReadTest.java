@@ -14,6 +14,8 @@ import com.echo.infra.vision.StubVisionClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -76,14 +78,67 @@ class PlazaWorkReadTest {
         assertThat(items(plaza(bound, 50))).hasSize(35);
     }
 
+    @Test
+    void twoApisSharingStoreKeepTheSameAnonymousBatch() throws Exception {
+        AnonPlazaBatchStore shared = new AnonPlazaBatchStore(null);
+        for (int i = 0; i < 35; i++) {
+            works.insert(work(authorId, Work.Status.PUBLIC, "共享-" + i, 200 + i));
+        }
+        putViewer(viewerId, true);
+        List<Map<String, Object>> first = items(plaza(newApi(shared), viewerId, 50));
+        List<Map<String, Object>> second = items(plaza(newApi(shared), viewerId, 50));
+        assertThat(first).hasSize(30);
+        assertThat(second.stream().map(item -> item.get("id")).toList())
+                .isEqualTo(first.stream().map(item -> item.get("id")).toList());
+    }
+
+    @Test
+    void anonymousBatchChangesOnlyAfterTtl() {
+        List<Work> visible = new ArrayList<>();
+        for (int i = 0; i < 35; i++) {
+            visible.add(work(authorId, Work.Status.PUBLIC, "批次-" + i, 300 + i));
+        }
+        AnonPlazaBatchStore store = new AnonPlazaBatchStore(null);
+        long t0 = 1_000L;
+        List<Work> first = store.freeze(viewerId, visible, t0);
+        List<Work> reversed = new ArrayList<>(visible);
+        Collections.reverse(reversed);
+        List<Work> held = store.freeze(viewerId, reversed, t0 + AnonPlazaBatchStore.TTL_MS - 1);
+        assertThat(held.stream().map(work -> work.id).toList())
+                .isEqualTo(first.stream().map(work -> work.id).toList());
+        List<Work> renewed = store.freeze(viewerId, reversed, t0 + AnonPlazaBatchStore.TTL_MS);
+        assertThat(renewed.stream().map(work -> work.id).toList())
+                .isEqualTo(reversed.subList(0, 30).stream().map(work -> work.id).toList());
+        assertThat(renewed.get(0).id).isNotEqualTo(first.get(0).id);
+    }
+
+    private EchoApi newApi(AnonPlazaBatchStore batches) {
+        EchoApi api = new EchoApi(accounts, ids, new MockLlmClient(), new StubVisionClient(),
+                null, new InMemoryTrainingCorpus());
+        api.setWorkStore(works);
+        api.setBlockService(blocks);
+        api.setAnonPlazaBatchStore(batches);
+        return api;
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> plaza(long viewer) throws Exception {
-        return plaza(viewer, 20);
+        return plaza(router, viewer, 20);
     }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> plaza(long viewer, int limit) throws Exception {
-        Router.Match match = router.match("GET", "/plaza");
+        return plaza(router, viewer, limit);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> plaza(EchoApi api, long viewer, int limit) throws Exception {
+        return plaza(api.routes(false), viewer, limit);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> plaza(Router routes, long viewer, int limit) throws Exception {
+        Router.Match match = routes.match("GET", "/plaza");
         Object result = match.handle(new RequestContext(
                 "GET", match.pathParams, Map.of("limit", String.valueOf(limit)), null, viewer, Map.of()));
         return (Map<String, Object>) result;

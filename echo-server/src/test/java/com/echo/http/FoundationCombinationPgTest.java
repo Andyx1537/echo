@@ -7,6 +7,7 @@ import com.echo.http.behavior.BehaviorLedger;
 import com.echo.http.behavior.ExplicitFeedbackStore;
 import com.echo.http.model.Models.AccountProfile;
 import com.echo.http.store.InMemoryEchoStore;
+import com.echo.http.work.AnonPlazaBatchStore;
 import com.echo.http.work.ResourceStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkCommentStore;
@@ -72,8 +73,9 @@ class FoundationCombinationPgTest {
         try {
             db.query("SELECT 1 FROM \"t_work_comment\" LIMIT 1", null);
             db.query("SELECT 1 FROM \"t_work_favorite\" LIMIT 1", null);
+            db.query("SELECT 1 FROM \"t_anon_plaza_batch\" LIMIT 1", null);
         } catch (SQLException e) {
-            throw new AssertionError("测试库缺少评论/收藏表，需要 schema 2026091403+", e);
+            throw new AssertionError("测试库缺少评论/收藏/匿名批次表，需要 schema 2026091405+", e);
         }
     }
 
@@ -87,7 +89,7 @@ class FoundationCombinationPgTest {
     @BeforeEach
     void setUp() throws Exception {
         assumeTrue(db != null);
-        for (String table : new String[]{"t_work_favorite", "t_work_comment", "t_work", "t_account"}) {
+        for (String table : new String[]{"t_work_favorite", "t_work_comment", "t_anon_plaza_batch", "t_work", "t_account"}) {
             db.update("DELETE FROM \"" + table + "\"");
         }
         authorId = ids.nextId();
@@ -188,6 +190,7 @@ class FoundationCombinationPgTest {
         EchoApi echo = new EchoApi(accounts, ids, new MockLlmClient(), new StubVisionClient(),
                 null, new InMemoryTrainingCorpus());
         echo.setWorkStore(works);
+        echo.setAnonPlazaBatchStore(new AnonPlazaBatchStore(db));
         router = echo.routes(false);
         WorksApi worksApi = new WorksApi(works, accounts, null, new ResourceStore(null), null, ids);
         worksApi.setFavoriteStore(favorites);

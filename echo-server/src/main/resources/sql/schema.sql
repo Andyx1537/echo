@@ -1794,6 +1794,14 @@ CREATE TABLE IF NOT EXISTS "t_work_social_idempotency" (
     PRIMARY KEY ("accountId", "idempotencyKey")
 );
 
+-- 匿名广场两小时一批。不挂 t_account 外键：内存测与游客不必先插账号。
+CREATE TABLE IF NOT EXISTS "t_anon_plaza_batch" (
+    "accountId" bigint NOT NULL,
+    "workIds"   text   NOT NULL,
+    "startedAt" bigint NOT NULL,
+    PRIMARY KEY ("accountId")
+);
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
@@ -1805,5 +1813,6 @@ VALUES (2026083101, 1788177600000),
        (2026091401, 1789372800000),
        (2026091402, 1789376400000),
        (2026091403, 1789380000000),
-       (2026091404, 1789383600000)
+       (2026091404, 1789383600000),
+       (2026091405, 1789387200000)
 ON CONFLICT ("version") DO NOTHING;

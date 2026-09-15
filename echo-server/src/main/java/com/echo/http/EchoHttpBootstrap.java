@@ -31,6 +31,7 @@ import com.echo.http.work.ResourceStore;
 import com.echo.http.behavior.BehaviorEventStore;
 import com.echo.http.behavior.BehaviorLedger;
 import com.echo.http.behavior.ExplicitFeedbackStore;
+import com.echo.http.work.AnonPlazaBatchStore;
 import com.echo.http.work.WorkCommentStore;
 import com.echo.http.work.WorkFavoriteStore;
 import com.echo.http.work.WorkReviewEvidenceStore;
@@ -199,6 +200,7 @@ public final class EchoHttpBootstrap {
         new BehaviorApi(behaviorEvents, store, idGenerator,
                 new ExplicitFeedbackStore(pgDb), behaviorLedger).register(router);
         api.setWorkStore(workStore);
+        api.setAnonPlazaBatchStore(new AnonPlazaBatchStore(pgDb));
         api.setStorage(storage);
 
         registerCapabilityProbes(capabilities, router, contentSafety);
