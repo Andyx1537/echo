@@ -335,9 +335,7 @@ public final class OnboardingApi {
             ensureState(s, "collecting");
             String normalizedMediaType = normalizeMediaType(mediaType);
             long count = s.assets.stream().filter(a -> normalizedMediaType.equals(a.mediaType)).count();
-            long limit = "image".equals(normalizedMediaType) ? 2 : "video".equals(normalizedMediaType) ? 2 : 0;
-            if (limit == 0) throw error("asset_upload_incomplete");
-            if (count >= limit) throw error("asset_limit_exceeded");
+            if (count >= 2) throw error("asset_limit_exceeded");
             OnboardingAggregate.Asset asset = new OnboardingAggregate.Asset();
             asset.assetId = String.valueOf(ids.nextId());
             asset.resourceId = resourceId;
@@ -638,7 +636,11 @@ public final class OnboardingApi {
 
     private static String normalizeMediaType(String mediaType) {
         String normalized = mediaType == null ? "" : mediaType.trim().toLowerCase(java.util.Locale.ROOT);
-        if (!Set.of("image", "video").contains(normalized)) throw error("asset_upload_incomplete");
+        if ("video".equals(normalized)) {
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "建档这一步只收照片，视频先不用传。", "asset_video_not_accepted");
+        }
+        if (!"image".equals(normalized)) throw error("asset_upload_incomplete");
         return normalized;
     }
 }

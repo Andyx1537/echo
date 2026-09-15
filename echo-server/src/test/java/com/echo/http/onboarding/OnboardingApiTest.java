@@ -213,6 +213,17 @@ class OnboardingApiTest {
     }
 
     @Test
+    void onboardingAssetsRejectVideo() throws Exception {
+        String id = (String) call("POST", "/pet/onboarding", new JsonObject(), "create-video")
+                .get("onboardingId");
+        assertThatThrownBy(() -> newApi().attachUploadedAsset(accountId, id, "vid", 0,
+                "res", "video", "fp-video"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertThat(error.detail()).isEqualTo("asset_video_not_accepted"));
+        assertThat(repository.find(id).assets).isEmpty();
+    }
+
+    @Test
     void rejectsAnObviouslyDifferentPetAcrossAssets() throws Exception {
         String id = (String) call("POST", "/pet/onboarding", new JsonObject(), "create-consistency")
                 .get("onboardingId");
