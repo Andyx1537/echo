@@ -1418,6 +1418,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_source_card"
     ON "t_work" ("sourceCardId")
     WHERE "sourceCardId" IS NOT NULL AND "deletedAt" IS NULL;
 
+-- 用户级单通道（G-36/WS1）：同一作者同一时间只能有一条占用投稿名额的作品。
+-- 先查再插挡不住并发双发；这条部分唯一才是库里的最后一道闸。
+CREATE UNIQUE INDEX IF NOT EXISTS "t_work_uk_author_inflight"
+    ON "t_work" ("authorId")
+    WHERE "status" IN ('pending', 'uploading', 'submitting') AND "deletedAt" IS NULL;
+
 -- 按来源拆分口径（北极星分母、官方号观测），与 t_memory_card 的同名索引对齐。
 CREATE INDEX IF NOT EXISTS "t_work_idx_origin_reviewed"
     ON "t_work" ("originType", "reviewedAt") WHERE "reviewedAt" IS NOT NULL;
@@ -1798,5 +1804,6 @@ VALUES (2026083101, 1788177600000),
        (2026090702, 1788768000000),
        (2026091401, 1789372800000),
        (2026091402, 1789376400000),
-       (2026091403, 1789380000000)
+       (2026091403, 1789380000000),
+       (2026091404, 1789383600000)
 ON CONFLICT ("version") DO NOTHING;

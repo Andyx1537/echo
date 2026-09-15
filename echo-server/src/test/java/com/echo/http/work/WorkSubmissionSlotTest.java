@@ -52,6 +52,41 @@ class WorkSubmissionSlotTest {
         assertThat(store.occupyingWork(7)).isNull();
     }
 
+    @Test
+    void concurrentPendingInsertsKeepOnlyOneSlot() throws Exception {
+        WorkStore store = new WorkStore(null);
+        Work first = work(21, 9, Work.Status.PENDING, 10);
+        Work second = work(22, 9, Work.Status.PENDING, 11);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var a = pool.submit(() -> store.insert(first));
+            var b = pool.submit(() -> store.insert(second));
+            boolean firstOk = a.get();
+            boolean secondOk = b.get();
+            assertThat(firstOk || secondOk).isTrue();
+            assertThat(firstOk && secondOk).isFalse();
+            assertThat(store.occupyingWork(9).id).isIn(21L, 22L);
+            assertThat(store.insert(work(23, 9, Work.Status.PENDING, 12))).isFalse();
+            assertThat(store.insert(work(24, 9, Work.Status.PUBLIC, 13))).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void resubmitDoesNotStealAnotherPendingSlot() {
+        WorkStore store = new WorkStore(null);
+        Work pending = work(31, 4, Work.Status.PENDING, 10);
+        Work rejected = work(32, 4, Work.Status.REJECTED, 11);
+        rejected.contentVersion = 2;
+        assertThat(store.insert(pending)).isTrue();
+        assertThat(store.insert(rejected)).isTrue();
+        rejected.status = Work.Status.PENDING;
+        assertThat(store.casResubmit(rejected, 2)).isFalse();
+        assertThat(store.occupyingWork(4).id).isEqualTo(31);
+        assertThat(store.byId(32).status).isEqualTo(Work.Status.REJECTED);
+    }
+
     private static Work work(long id, long authorId, String status, long createdAt) {
         Work w = new Work();
         w.id = id;

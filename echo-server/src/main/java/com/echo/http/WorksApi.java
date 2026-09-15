@@ -120,10 +120,7 @@ public final class WorksApi {
         long me = BindingGuard.requireBound(accounts, ctx);
         Work occupying = store.occupyingWork(me);
         if (occupying != null) {
-            throw new ApiException(ApiException.RULE_FORBIDDEN,
-                    "还有一条作品正在处理，先等它走完再发新的。",
-                    "submission_slot_occupied",
-                    Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
+            throw occupiedSlot(occupying);
         }
         JsonObject b = ctx.body();
         Long sourceCardId = parseNullableId(Json.getString(b, "sourceCardId", ""));
@@ -250,11 +247,14 @@ public final class WorksApi {
             w.reviewedAt = now;
             w.reviewEvidenceId = decision.evidence.reviewEvidenceId;
             if (!store.insertConsumingEvidence(w, reviewEvidence, decision.evidence.reviewEvidenceId)) {
+                Work blocker = store.occupyingWork(me);
+                if (blocker != null && blocker.id != w.id) {
+                    throw occupiedSlot(blocker);
+                }
                 throw publishRefused("evidence_consumed");
             }
         } else if (!store.insert(w)) {
-            throw new ApiException(ApiException.BAD_PARAM, "没能发出去，再试一次？",
-                    "insert failed for work " + w.id);
+            throw insertRefused(me, w.id);
         }
         log.info("[works] 发布 id={} authorId={} mediaType={} fromCard={} ai={} reviewMode={} reason={}",
                 w.id, me, mediaType, sourceCardId, w.aiGenerated, w.reviewMode, decision.reasonCode);
@@ -397,10 +397,7 @@ public final class WorksApi {
         }
         Work occupying = store.occupyingWork(me);
         if (occupying != null && occupying.id != w.id) {
-            throw new ApiException(ApiException.RULE_FORBIDDEN,
-                    "还有一条作品正在处理，先等它走完再发新的。",
-                    "submission_slot_occupied",
-                    Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
+            throw occupiedSlot(occupying);
         }
         inspectText(w.title, w.body);
         if (!resources.ownedBy(w.mediaKey, me)) {
@@ -418,6 +415,10 @@ public final class WorksApi {
         w.updatedAt = now;
         w.publishedAt = now;
         if (!store.casResubmit(w, expectedVersion)) {
+            Work blocker = store.occupyingWork(me);
+            if (blocker != null && blocker.id != w.id) {
+                throw occupiedSlot(blocker);
+            }
             throw new ApiException(ApiException.BAD_PARAM,
                     "先刷新一下再提。", "work_version_conflict");
         }
@@ -535,6 +536,22 @@ public final class WorksApi {
             throw new ApiException(ApiException.BAD_PARAM,
                     "这段话里有些词不太合适，改一改再发？", "safety gate rejected");
         }
+    }
+
+    private ApiException insertRefused(long authorId, long attemptedId) {
+        Work blocker = store.occupyingWork(authorId);
+        if (blocker != null && blocker.id != attemptedId) {
+            return occupiedSlot(blocker);
+        }
+        return new ApiException(ApiException.BAD_PARAM, "没能发出去，再试一次？",
+                "insert failed for work " + attemptedId);
+    }
+
+    private static ApiException occupiedSlot(Work occupying) {
+        return new ApiException(ApiException.RULE_FORBIDDEN,
+                "还有一条作品正在处理，先等它走完再发新的。",
+                "submission_slot_occupied",
+                Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
     }
 
     private static ApiException publishRefused(String reason) {

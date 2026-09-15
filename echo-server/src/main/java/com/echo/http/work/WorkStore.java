@@ -43,6 +43,8 @@ public final class WorkStore {
     private final PgDb db;
     /** 内存态兜底：id -> 作品。仅在 {@code db == null} 时使用。 */
     private final Map<Long, Work> memory = new ConcurrentHashMap<>();
+    /** 内存态下挡住并发双发；有库时靠 {@code t_work_uk_author_inflight}。 */
+    private final Object slotLock = new Object();
 
     public WorkStore(PgDb db) {
         this.db = db;
@@ -57,8 +59,13 @@ public final class WorkStore {
     /** 落一条作品。返回是否成功。 */
     public boolean insert(Work w) {
         if (!persistent()) {
-            memory.put(w.id, w);
-            return true;
+            synchronized (slotLock) {
+                if (!memorySlotAllows(w)) {
+                    return false;
+                }
+                memory.put(w.id, w);
+                return true;
+            }
         }
         String sql = insertSql();
         try (Connection conn = db.getConnection();
@@ -81,12 +88,17 @@ public final class WorkStore {
             return false;
         }
         if (!persistent()) {
-            synchronized (evidence.lock()) {
-                if (!evidence.tryConsume(evidenceId, w.id)) {
-                    return false;
+            synchronized (slotLock) {
+                synchronized (evidence.lock()) {
+                    if (!memorySlotAllows(w)) {
+                        return false;
+                    }
+                    if (!evidence.tryConsume(evidenceId, w.id)) {
+                        return false;
+                    }
+                    memory.put(w.id, w);
+                    return true;
                 }
-                memory.put(w.id, w);
-                return true;
             }
         }
         try {
@@ -187,17 +199,25 @@ public final class WorkStore {
      */
     public boolean casResubmit(Work w, int expectedVersion) {
         if (!persistent()) {
-            Work existing = memory.get(w.id);
-            if (existing == null || existing.isDeleted()) {
-                return false;
+            synchronized (slotLock) {
+                Work existing = memory.get(w.id);
+                if (existing == null || existing.isDeleted()) {
+                    return false;
+                }
+                // 调用方先改同一份对象再 CAS：内存里 existing == w，不能再拿改后的 status 对 rejected。
+                if (existing != w && (!Work.Status.REJECTED.equals(existing.status)
+                        || existing.contentVersion != expectedVersion)) {
+                    return false;
+                }
+                if (!memorySlotAllows(w)) {
+                    if (existing == w) {
+                        existing.status = Work.Status.REJECTED;
+                    }
+                    return false;
+                }
+                memory.put(w.id, w);
+                return true;
             }
-            // 调用方先改同一份对象再 CAS：内存里 existing == w，不能再拿改后的 status 对 rejected。
-            if (existing != w && (!Work.Status.REJECTED.equals(existing.status)
-                    || existing.contentVersion != expectedVersion)) {
-                return false;
-            }
-            memory.put(w.id, w);
-            return true;
         }
         String sql = "UPDATE \"t_work\" SET \"mediaType\"=?,\"mediaKey\"=?,\"posterKey\"=?,"
                 + "\"durationMs\"=?,\"width\"=?,\"height\"=?,\"title\"=?,\"body\"=?,"
@@ -277,6 +297,17 @@ public final class WorkStore {
      * @param includeUnpublished 作者看自己时为 {@code true}（草稿与待审也要看得见）；
      *                           🔴 陌生人看别人时<b>必须</b>为 {@code false}
      */
+    private boolean memorySlotAllows(Work w) {
+        if (w == null || w.isDeleted() || !WorkSubmissionSlot.occupies(w.status)) {
+            return true;
+        }
+        return memory.values().stream()
+                .noneMatch(other -> other.id != w.id
+                        && !other.isDeleted()
+                        && other.authorId == w.authorId
+                        && WorkSubmissionSlot.occupies(other.status));
+    }
+
     /** The work currently occupying the author's single submission slot, if any. */
     public Work occupyingWork(long authorId) {
         if (!persistent()) {
