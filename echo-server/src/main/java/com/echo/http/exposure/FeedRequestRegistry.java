@@ -1,8 +1,14 @@
 package com.echo.http.exposure;
 
+import com.echo.infra.persistence.PgDb;
 import lombok.extern.slf4j.Slf4j;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -10,27 +16,14 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * {@code reqId → 下发快照} 的内存 LRU（{@code TECH-DESIGN §3.10.4} 防刷校验 1–4 的依据）。
+ * {@code reqId → 下发快照}（{@code TECH-DESIGN §3.10.4} 防刷校验 1–4 的依据）。
  *
  * <p>{@code GET /plaza} 每次下发时登记一条：这次发给了谁、发了哪些 id、各自的位次、
  * 通道/池归属、下发时刻。上报时按 {@code reqId} 反查，这样"伪造任意卡的曝光"就变得不可能——
  * 攻击者只能给"服务端确实发给他的卡"报曝光，而那本来就是要算的。</p>
  *
- * <h2>🔴 单实例前提（部署约束，不是实现细节）</h2>
- *
- * <p>本类是<b>单进程内存态</b>。多实例部署下 {@code reqId} 必须能被处理该请求的任意实例读到，
- * 否则会出现「在 A 实例拿到的 feed、上报打到 B 实例被判 {@code unknown_req}」——
- * 曝光被大面积静默丢弃，而 {@link ExposureRecorder.Reject#UNKNOWN_REQ} 在日志里看起来
- * 和"有人在伪造 reqId"一模一样。</p>
- *
- * <p>🔴 <b>这个失效必须在部署前被发现，不能靠上线后排查曝光数据异常。</b>因此：</p>
- * <ul>
- *   <li>{@link #assertSingleInstance} 在启动期检查多实例信号，命中则<b>拒绝启动</b>；</li>
- *   <li>{@link #health} 供健康检查暴露 {@code singleInstanceAssumed} 与
- *       {@code unknownReqRate}，运行期也能看出来。</li>
- * </ul>
- *
- * <p>改造方案与工作量估计见交付说明；当前是单实例，不值得为此引入 Redis。</p>
+ * <p>有库时读写 {@code t_feed_request}，换实例仍能按同一份 {@code reqId} 校验。
+ * 无库时仍是进程内 LRU；那时多副本会把合法上报判成 {@code unknown_req}，启动期拦下。</p>
  */
 @Slf4j
 public final class FeedRequestRegistry {
@@ -104,10 +97,16 @@ public final class FeedRequestRegistry {
     }
 
     private final ExposureConfig config;
+    private final PgDb db;
     private final Map<String, Snapshot> snapshots;
 
     public FeedRequestRegistry(ExposureConfig config) {
+        this(config, null);
+    }
+
+    public FeedRequestRegistry(ExposureConfig config, PgDb db) {
         this.config = config;
+        this.db = db;
         int max = Math.max(1, config.reqMax());
         this.snapshots = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
             @Override
@@ -115,6 +114,10 @@ public final class FeedRequestRegistry {
                 return size() > max;
             }
         });
+    }
+
+    private boolean persistent() {
+        return db != null;
     }
 
     /**
@@ -133,10 +136,12 @@ public final class FeedRequestRegistry {
         for (int i = 0; i < deliveredIds.size(); i++) {
             positions.putIfAbsent(deliveredIds.get(i), i);
         }
-        snapshots.put(reqId, new Snapshot(viewerId, targetKind, surface, Map.copyOf(positions),
+        Snapshot snap = new Snapshot(viewerId, targetKind, surface, Map.copyOf(positions),
                 Set.copyOf(boostIds == null ? Set.of() : boostIds),
                 channel == null ? "" : channel, pool == null ? "" : pool,
-                System.currentTimeMillis()));
+                System.currentTimeMillis());
+        persist(reqId, snap);
+        snapshots.put(reqId, snap);
         return reqId;
     }
 
@@ -147,10 +152,17 @@ public final class FeedRequestRegistry {
         }
         Snapshot s = snapshots.get(reqId);
         if (s == null) {
+            s = load(reqId);
+            if (s != null) {
+                snapshots.put(reqId, s);
+            }
+        }
+        if (s == null) {
             return null;
         }
         if (isExpired(s)) {
             snapshots.remove(reqId);
+            delete(reqId);
             return null;
         }
         return s;
@@ -171,17 +183,26 @@ public final class FeedRequestRegistry {
         synchronized (snapshots) {
             snapshots.entrySet().removeIf(e -> isExpired(e.getValue()));
         }
-        return before - snapshots.size();
+        int memory = before - snapshots.size();
+        if (!persistent()) {
+            return memory;
+        }
+        long cutoff = System.currentTimeMillis() - config.reqTtlSeconds() * 1000L;
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "DELETE FROM \"t_feed_request\" WHERE \"deliveredAt\" < ?")) {
+            ps.setLong(1, cutoff);
+            return memory + ps.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("清理过期 feed 快照失败: {}", e.getMessage());
+            return memory;
+        }
     }
 
     // ------------------------------------------------ 单实例前提的可发现性
 
     /**
-     * 声明副本数的环境变量。部署方（K8s Deployment / compose scale）应当把它透传进来。
-     *
-     * <p>🔴 <b>为什么读环境变量而不是自己探测集群</b>：探测需要服务发现或共享存储，
-     * 而我们恰恰是因为「不想为这件事引入 Redis」才停在单实例。读一个由部署方声明的数字，
-     * 成本是零，且它<b>正好在扩副本的那次改动里被改到</b>——那是最需要被提醒的时刻。</p>
+     * 声明副本数的环境变量。无库部署必须单副本；有库时快照已共享，此变量只作观测。
      */
     public static final String ENV_REPLICA_COUNT = "ECHO_REPLICA_COUNT";
 
@@ -189,31 +210,31 @@ public final class FeedRequestRegistry {
     public static final String ENV_ALLOW_MULTI = "ECHO_ALLOW_MULTI_INSTANCE_EXPOSURE";
 
     /**
-     * 启动期断言单实例前提。
-     *
-     * <p>🔴 多副本时<b>抛异常拒绝启动</b>，而不是打个告警继续跑。理由：告警会被当噪音划掉，
-     * 而这个失效的表现是「曝光数据静默偏低」——它不会让任何请求失败，只会让权重衰减模型
-     * 长期读到错的数，等到有人发现排序不对劲，已经过去很久了。启动失败是刺眼的，
-     * 而刺眼正是这里需要的。</p>
-     *
-     * @throws IllegalStateException 声明的副本数 &gt; 1 且未显式放行
+     * 启动期断言：无库时仍是单进程快照，声明多副本则拒绝启动。
+     * 有库时快照在 {@code t_feed_request}，多副本可以跑。
      */
     public static void assertSingleInstance() {
+        assertSingleInstance(false);
+    }
+
+    public static void assertSingleInstance(boolean sharedSnapshots) {
+        if (sharedSnapshots) {
+            return;
+        }
         int replicas = replicaCount();
         if (replicas <= 1) {
             return;
         }
         if (Boolean.parseBoolean(System.getenv(ENV_ALLOW_MULTI))) {
-            log.error("🔴 {}={} 但已显式放行（{}=true）：曝光上报会因 reqId 跨实例不可见而被大面积"
+            log.error("🔴 {}={} 但已显式放行（{}=true）：无库时曝光上报会因 reqId 跨实例不可见而被大面积"
                             + "判为 unknown_req，t_card_exposure 将系统性偏低。仅限灰度演练。",
                     ENV_REPLICA_COUNT, replicas, ENV_ALLOW_MULTI);
             return;
         }
         throw new IllegalStateException(String.format(
-                "曝光记账（FeedRequestRegistry）目前是单进程内存态，不支持多实例：%s=%d。"
-                        + "reqId 快照无法跨实例读取，上报会被判 unknown_req 并静默丢弃，"
-                        + "导致权重衰减模型读到系统性偏低的曝光数。"
-                        + "请改为单副本，或先把快照迁到共享缓存（Redis）后再扩副本；"
+                "曝光记账（FeedRequestRegistry）无库时是单进程内存态，不支持多实例：%s=%d。"
+                        + "reqId 快照无法跨实例读取，上报会被判 unknown_req 并静默丢弃。"
+                        + "请打开 PostgreSQL 让快照落 t_feed_request，或改为单副本；"
                         + "确需带此风险运行请设 %s=true。",
                 ENV_REPLICA_COUNT, replicas, ENV_ALLOW_MULTI));
     }
@@ -232,18 +253,135 @@ public final class FeedRequestRegistry {
     }
 
     /**
-     * 健康检查字段。
-     *
-     * <p>把 {@code singleInstanceAssumed} 暴露出来，是为了让运行期也能看出这个前提——
-     * 启动期断言只在启动那一刻有效，而副本数可能在之后被改。</p>
+     * 健康检查字段。无库时 {@code singleInstanceAssumed=true}；有库时快照可跨实例。
      */
     public Map<String, Object> health() {
         Map<String, Object> h = new LinkedHashMap<>();
-        h.put("singleInstanceAssumed", true);
+        h.put("singleInstanceAssumed", !persistent());
+        h.put("snapshotStore", persistent() ? "postgres" : "memory");
         h.put("declaredReplicas", replicaCount());
         h.put("snapshots", size());
         h.put("snapshotCapacity", config.reqMax());
         h.put("ttlSeconds", config.reqTtlSeconds());
         return h;
+    }
+
+    private void persist(String reqId, Snapshot snap) {
+        if (!persistent()) {
+            return;
+        }
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "INSERT INTO \"t_feed_request\""
+                             + " (\"reqId\",\"viewerId\",\"targetKind\",\"surface\","
+                             + "\"deliveredPositions\",\"boostIds\",\"channel\",\"pool\",\"deliveredAt\")"
+                             + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+            ps.setString(1, reqId);
+            ps.setLong(2, snap.viewerId());
+            ps.setString(3, snap.targetKind());
+            ps.setString(4, snap.surface());
+            ps.setString(5, encodePositions(snap.deliveredPositions()));
+            ps.setString(6, encodeBoosts(snap.boostIds()));
+            ps.setString(7, snap.channel());
+            ps.setString(8, snap.pool());
+            ps.setLong(9, snap.deliveredAt());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("写入 feed 快照失败 reqId={}: {}", reqId, e.getMessage());
+        }
+    }
+
+    private Snapshot load(String reqId) {
+        if (!persistent()) {
+            return null;
+        }
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT \"viewerId\",\"targetKind\",\"surface\",\"deliveredPositions\","
+                             + "\"boostIds\",\"channel\",\"pool\",\"deliveredAt\""
+                             + " FROM \"t_feed_request\" WHERE \"reqId\"=?")) {
+            ps.setString(1, reqId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return new Snapshot(
+                        rs.getLong("viewerId"),
+                        rs.getString("targetKind"),
+                        rs.getString("surface"),
+                        decodePositions(rs.getString("deliveredPositions")),
+                        decodeBoosts(rs.getString("boostIds")),
+                        rs.getString("channel"),
+                        rs.getString("pool"),
+                        rs.getLong("deliveredAt"));
+            }
+        } catch (SQLException e) {
+            log.warn("读取 feed 快照失败 reqId={}: {}", reqId, e.getMessage());
+            return null;
+        }
+    }
+
+    private void delete(String reqId) {
+        if (!persistent()) {
+            return;
+        }
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "DELETE FROM \"t_feed_request\" WHERE \"reqId\"=?")) {
+            ps.setString(1, reqId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("删除过期 feed 快照失败 reqId={}: {}", reqId, e.getMessage());
+        }
+    }
+
+    static String encodePositions(Map<String, Integer> positions) {
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, Integer> e : positions.entrySet()) {
+            if (out.length() > 0) {
+                out.append(',');
+            }
+            out.append(e.getKey()).append(':').append(e.getValue());
+        }
+        return out.toString();
+    }
+
+    static Map<String, Integer> decodePositions(String raw) {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        if (raw == null || raw.isBlank()) {
+            return Map.of();
+        }
+        for (String part : raw.split(",")) {
+            int colon = part.lastIndexOf(':');
+            if (colon <= 0 || colon == part.length() - 1) {
+                continue;
+            }
+            try {
+                out.put(part.substring(0, colon), Integer.parseInt(part.substring(colon + 1)));
+            } catch (NumberFormatException ignored) {
+                // 脏行跳过，整份快照仍可用其余位次
+            }
+        }
+        return Map.copyOf(out);
+    }
+
+    static String encodeBoosts(Set<String> boostIds) {
+        if (boostIds == null || boostIds.isEmpty()) {
+            return "";
+        }
+        return String.join(",", boostIds);
+    }
+
+    static Set<String> decodeBoosts(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Set.of();
+        }
+        Set<String> out = new HashSet<>();
+        for (String part : raw.split(",")) {
+            if (!part.isBlank()) {
+                out.add(part.trim());
+            }
+        }
+        return Set.copyOf(out);
     }
 }

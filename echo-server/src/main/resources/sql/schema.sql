@@ -1802,6 +1802,22 @@ CREATE TABLE IF NOT EXISTS "t_anon_plaza_batch" (
     PRIMARY KEY ("accountId")
 );
 
+-- 广场下发 reqId 快照。无库时只活在进程里，多实例会把合法上报判成 unknown_req。
+CREATE TABLE IF NOT EXISTS "t_feed_request" (
+    "reqId"               varchar(64)  NOT NULL,
+    "viewerId"            bigint       NOT NULL,
+    "targetKind"          varchar(16)  NOT NULL,
+    "surface"             varchar(16)  NOT NULL,
+    "deliveredPositions"  text         NOT NULL,
+    "boostIds"            text         NOT NULL DEFAULT '',
+    "channel"             varchar(64)  NOT NULL DEFAULT '',
+    "pool"                varchar(64)  NOT NULL DEFAULT '',
+    "deliveredAt"         bigint       NOT NULL,
+    PRIMARY KEY ("reqId")
+);
+CREATE INDEX IF NOT EXISTS "t_feed_request_idx_delivered"
+    ON "t_feed_request" ("deliveredAt");
+
 -- 必须是整份脚本最后一条结构写入：前面任一步失败时绝不能提前宣告版本已完成。
 INSERT INTO "t_schema_version" ("version", "appliedAt")
 VALUES (2026083101, 1788177600000),
@@ -1814,5 +1830,6 @@ VALUES (2026083101, 1788177600000),
        (2026091402, 1789376400000),
        (2026091403, 1789380000000),
        (2026091404, 1789383600000),
-       (2026091405, 1789387200000)
+       (2026091405, 1789387200000),
+       (2026091406, 1789390800000)
 ON CONFLICT ("version") DO NOTHING;

@@ -207,10 +207,10 @@ public final class EchoHttpBootstrap {
         logGovernanceReadiness(capabilities, switches);
 
         // 曝光记账（G-2）：/plaza 签发 reqId → /plaza/impressions 按快照做五道校验 → 异步批量落 t_card_exposure。
-        // 🔴 单实例前提：多副本会让 reqId 跨实例不可见，曝光被静默判为 unknown_req。启动期就要撞出来。
-        FeedRequestRegistry.assertSingleInstance();
+        // 有库时快照落 t_feed_request，换实例仍能校验；无库时多副本会 unknown_req，启动期拦下。
         ExposureConfig exposureConfig = ExposureConfig.fromEnv();
-        FeedRequestRegistry feedRequests = new FeedRequestRegistry(exposureConfig);
+        FeedRequestRegistry feedRequests = new FeedRequestRegistry(exposureConfig, pgDb);
+        FeedRequestRegistry.assertSingleInstance(pgDb != null);
         api.setFeedRequests(feedRequests);
         ExposureRecorder exposureRecorder = new ExposureRecorder(exposureConfig, feedRequests, pgDb, idGenerator);
         new ImpressionApi(exposureRecorder).register(router);
