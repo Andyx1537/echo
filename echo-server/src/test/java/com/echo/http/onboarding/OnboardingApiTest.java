@@ -120,6 +120,26 @@ class OnboardingApiTest {
         assertThat(current.status).isEqualTo("candidate_ready");
         assertThat(current.candidates).isNotEmpty();
         assertThat(OnboardingViews.snapshot(current).get("allowedActions").toString()).doesNotContain("confirm");
+        assertThat(OnboardingViews.snapshot(current).get("allowedActions").toString()).contains("set_consent");
+    }
+
+    @Test
+    void consentActionAppearsOnlyAfterACandidateIsChosen() throws Exception {
+        String id = readyWithCandidate();
+        OnboardingAggregate beforeSelect = repository.find(id);
+        assertThat(OnboardingViews.snapshot(beforeSelect).get("allowedActions").toString())
+                .doesNotContain("set_consent");
+        call("POST", "/pet/onboarding/" + id + "/candidates/" + beforeSelect.candidates.getFirst().candidateId + "/select",
+                body("expectedSessionVersion", beforeSelect.sessionVersion), "select-consent-gate");
+        OnboardingAggregate afterSelect = repository.find(id);
+        assertThat(OnboardingViews.snapshot(afterSelect).get("allowedActions").toString()).contains("set_consent");
+        call("PUT", "/pet/onboarding/" + id + "/consent",
+                body("granted", true, "policyVersion", "v1", "expectedSessionVersion", afterSelect.sessionVersion),
+                "grant-consent-gate");
+        OnboardingAggregate granted = repository.find(id);
+        String grantedActions = OnboardingViews.snapshot(granted).get("allowedActions").toString();
+        assertThat(grantedActions).contains("set_consent");
+        assertThat(grantedActions).contains("confirm");
     }
 
     @Test

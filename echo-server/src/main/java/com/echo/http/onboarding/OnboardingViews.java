@@ -89,8 +89,9 @@ public final class OnboardingViews {
             actions.addAll(List.of("generate", "save_answer", "abandon"));
         } else if ("candidate_ready".equals(s.status)) {
             actions.addAll(List.of("select_candidate", "refine", "abandon"));
+            if (s.selectedCandidateId != null) actions.add("set_consent");
         } else if ("ready_to_confirm".equals(s.status)) {
-            actions.addAll(List.of("refine", "abandon"));
+            actions.addAll(List.of("refine", "abandon", "set_consent"));
             if (s.consent.granted) actions.add("confirm");
         }
         return actions;
