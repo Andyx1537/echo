@@ -112,6 +112,8 @@ public final class WorksApi {
         r.add("PUT", "/works/:workId/draft", this::saveDraft);
         r.add("POST", "/works/:workId/resubmit", this::resubmit);
         r.add("DELETE", "/works/:workId", this::remove);
+        r.add("GET", "/works/:workId/moderation", this::myWorkModeration);
+        r.add("POST", "/works/:workId/appeal", this::appeal);
     }
 
     // ============================================================== 发布
@@ -452,6 +454,95 @@ public final class WorksApi {
         }
         store.softDelete(id, me, "author_delete", System.currentTimeMillis());
         return Map.of("ok", true);
+    }
+
+    /** {@code GET /works/:workId/moderation} —— 作者看自己这条的审核结果。 */
+    private Object myWorkModeration(RequestContext ctx) {
+        long me = BindingGuard.requireBound(accounts, ctx);
+        Work w = requireOwnWork(me, parseId(ctx.path("workId")));
+        if (w.isDeleted()) {
+            throw new ApiException(ApiException.NOT_FOUND, "这个作品找不到了。", "work deleted");
+        }
+        WorkModerationTicket t = workModeration == null || w.lastModerationId == null
+                ? null : workModeration.byId(w.lastModerationId);
+        boolean used = workModeration != null && workModeration.appealUsed(w.id);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("workId", String.valueOf(w.id));
+        data.put("status", w.status);
+        data.put("reasonCode", t == null ? null : t.reasonCode);
+        data.put("reasonText", t == null || t.reasonCode == null ? null
+                : "这一条我们看过了，暂时还不能公开。你可以改一改再试试。");
+        data.put("appealable", WorkModerationStore.appealable(w.status) && !used);
+        data.put("appealUsed", used);
+        data.put("appeal", workAppealBlock(t, used));
+        data.put("reviewedAt", w.reviewedAt);
+        data.put("handledAt", t == null ? null : t.handledAt);
+        return data;
+    }
+
+    /** {@code POST /works/:workId/appeal} —— 一条作品一生只能申一次。 */
+    private Object appeal(RequestContext ctx) {
+        long me = BindingGuard.requireBound(accounts, ctx);
+        Work w = requireOwnWork(me, parseId(ctx.path("workId")));
+        if (w.isDeleted()) {
+            throw new ApiException(ApiException.NOT_FOUND, "这个作品找不到了。", "work deleted");
+        }
+        String text = Json.requireString(ctx.body(), "text");
+        if (text.length() > 200) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "说得有点长了，缩短一些再试试？", "appeal text exceeds 200");
+        }
+        if (text.isBlank()) {
+            throw new ApiException(ApiException.BAD_PARAM, "先写一句再说。", "appeal text blank");
+        }
+        String safeText = CopyGuardFilter.sanitize(text);
+        if (!WorkModerationStore.appealable(w.status)) {
+            throw new ApiException(ModerationStateMachine.ERR_APPEAL_NOT_APPLICABLE,
+                    "这条现在还不需要申诉。", "appeal_not_applicable");
+        }
+        if (workModeration == null) {
+            throw new ApiException(ApiException.NOT_FOUND, "这里还空着，没找到你要的内容。",
+                    "no work moderation");
+        }
+        if (workModeration.appealUsed(w.id)) {
+            throw workAppealUsed();
+        }
+        WorkModerationStore.HandleResult result = workModeration.submitAppeal(store, w.id, safeText,
+                System.currentTimeMillis());
+        if (result == null) {
+            throw new ApiException(ModerationStateMachine.ERR_STATE_CONFLICT,
+                    "这条已经有人处理过了，刷新看看？", "moderation_state_conflict");
+        }
+        if (WorkModerationStore.FAIL_USED.equals(result.failDetail)) {
+            throw workAppealUsed();
+        }
+        if (result.failDetail != null) {
+            throw new ApiException(ModerationStateMachine.ERR_APPEAL_NOT_APPLICABLE,
+                    "这条现在还不需要申诉。", result.failDetail);
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("appealId", String.valueOf(result.moderationId));
+        data.put("state", Work.Status.APPEALING);
+        data.put("createdAt", result.handledAt);
+        return data;
+    }
+
+    private static Map<String, Object> workAppealBlock(WorkModerationTicket t, boolean used) {
+        if (t == null || t.appealAt == null) {
+            return used ? Map.of("used", true) : null;
+        }
+        Map<String, Object> a = new LinkedHashMap<>();
+        a.put("appealId", String.valueOf(t.id));
+        a.put("text", t.appealText);
+        a.put("appealAt", t.appealAt);
+        a.put("result", t.appealResult);
+        a.put("handledAt", t.appealHandledAt);
+        return a;
+    }
+
+    private static ApiException workAppealUsed() {
+        return new ApiException(ModerationStateMachine.ERR_APPEAL_USED,
+                "这条已经申诉过一次了，我们会认真看的。", "appeal_already_used");
     }
 
     // ============================================================== 内部

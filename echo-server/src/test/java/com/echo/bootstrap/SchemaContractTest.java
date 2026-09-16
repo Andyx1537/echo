@@ -36,6 +36,7 @@ class SchemaContractTest {
             assertThat(sql).contains("CREATE TABLE IF NOT EXISTS \"t_adaptation_profile_clear\"");
             assertThat(sql).contains("UNIQUE (\"accountId\", \"idempotencyKey\")");
             assertThat(sql).contains("CREATE UNIQUE INDEX IF NOT EXISTS \"t_work_uk_author_inflight\"");
+            assertThat(sql).contains("t_work_moderation_trg_appeal_at");
             assertThat(sql).contains("\"status\" IN ('active','expired','rejected','cleared')");
         }
     }

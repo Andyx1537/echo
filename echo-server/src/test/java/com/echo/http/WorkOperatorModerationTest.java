@@ -19,6 +19,7 @@ import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -26,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkOperatorModerationTest {
+    private static final long SUPERVISOR = 1001L;
     private static final long REVIEWER = 1002L;
 
     private final IDGenerator ids = new IDGenerator(47);
@@ -51,6 +53,11 @@ class WorkOperatorModerationTest {
         reviewer.deviceId = "reviewer";
         reviewer.guest = false;
         accounts.putProfile(reviewer);
+        AccountProfile supervisor = new AccountProfile();
+        supervisor.accountId = SUPERVISOR;
+        supervisor.deviceId = "supervisor";
+        supervisor.guest = false;
+        accounts.putProfile(supervisor);
         resources.record("media-1", authorId, "media-1", "image/jpeg", 12, 1);
 
         WorksApi worksApi = new WorksApi(works, accounts, null, resources, null, ids);
@@ -58,7 +65,7 @@ class WorkOperatorModerationTest {
         worksApi.setCardStore(cards);
         worksApi.setReviewEvidenceStore(evidence);
         ModerationApi moderationApi = new ModerationApi(new InMemoryModerationStore(ids),
-                AdminRoles.parse(REVIEWER + ":reviewer"), ids);
+                AdminRoles.parse(SUPERVISOR + ":supervisor," + REVIEWER + ":reviewer"), ids);
         moderationApi.setWorkModeration(works, tickets);
         router = new Router();
         worksApi.register(router);
@@ -228,14 +235,172 @@ class WorkOperatorModerationTest {
         assertThat(works.publicWorks(10)).isEmpty();
     }
 
+    @Test
+    void rejectThenAppealUpholdOnce() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "先驳", "body", "再申"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        WorkModerationTicket ticket = tickets.activeByWork(workId);
+        call(REVIEWER, "POST", "/admin/moderation/" + ticket.id + "/handle",
+                body("action", "reject", "expectedStateVersion", ticket.stateVersion, "reasonCode", "policy"));
+
+        Map<String, Object> mine = call(authorId, "GET", "/works/" + workId + "/moderation", null);
+        assertThat(mine).containsEntry("status", Work.Status.REJECTED)
+                .containsEntry("appealable", true)
+                .containsEntry("appealUsed", false);
+        assertThat(works.occupyingWork(authorId)).isNull();
+
+        Map<String, Object> appealed = call(authorId, "POST", "/works/" + workId + "/appeal",
+                body("text", "我想再请你们看一眼"));
+        assertThat(appealed).containsEntry("state", Work.Status.APPEALING);
+        assertThat(works.byId(workId).status).isEqualTo(Work.Status.APPEALING);
+        assertThat(works.occupyingWork(authorId)).isNull();
+        assertThat(tickets.appealUsed(workId)).isTrue();
+
+        Map<String, Object> queue = call(REVIEWER, "GET",
+                "/admin/moderation/queue?targetType=work&tab=appealing", null);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) queue.get("items");
+        assertThat(items).hasSize(1);
+        assertThat(items.get(0)).containsEntry("state", WorkModerationTicket.State.APPEALING);
+
+        assertThatThrownBy(() -> call(REVIEWER, "POST", "/admin/appeals/" + ticket.id + "/handle",
+                body("action", "uphold", "expectedStateVersion", ticket.stateVersion + 1)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        ex -> assertThat(ex.code()).isEqualTo(ApiException.RULE_FORBIDDEN));
+
+        WorkModerationTicket appealing = tickets.byId(ticket.id);
+        Map<String, Object> upheld = call(SUPERVISOR, "POST", "/admin/appeals/" + ticket.id + "/handle",
+                body("action", "uphold", "expectedStateVersion", appealing.stateVersion));
+        assertThat(upheld).containsEntry("workStatus", Work.Status.REJECTED)
+                .containsEntry("state", WorkModerationTicket.State.REJECTED);
+        assertThat(works.byId(workId).status).isEqualTo(Work.Status.REJECTED);
+        assertThat(tickets.byId(ticket.id).appealAt).isNotNull();
+
+        assertThatThrownBy(() -> call(authorId, "POST", "/works/" + workId + "/appeal",
+                body("text", "再申一次")))
+                .isInstanceOfSatisfying(ApiException.class, ex -> {
+                    assertThat(ex.code()).isEqualTo(ModerationStateMachine.ERR_APPEAL_USED);
+                    assertThat(ex.detail()).isEqualTo("appeal_already_used");
+                });
+        Map<String, Object> after = call(authorId, "GET", "/works/" + workId + "/moderation", null);
+        assertThat(after).containsEntry("appealable", false).containsEntry("appealUsed", true);
+    }
+
+    @Test
+    void takedownAppealOverturnGoesPendingNotPublic() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "过审", "body", "再申"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        WorkModerationTicket queued = tickets.activeByWork(workId);
+        Map<String, Object> approved = call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "approve", "expectedStateVersion", queued.stateVersion));
+        Long firstReviewedAt = (Long) approved.get("reviewedAt");
+        int version = ((Number) approved.get("stateVersion")).intValue();
+        call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "takedown", "expectedStateVersion", version, "reasonCode", "policy"));
+
+        call(authorId, "POST", "/works/" + workId + "/appeal", body("text", "请再审一次"));
+        WorkModerationTicket appealing = tickets.byId(queued.id);
+        Map<String, Object> overturned = call(SUPERVISOR, "POST", "/admin/appeals/" + queued.id + "/handle",
+                body("action", "overturn", "expectedStateVersion", appealing.stateVersion));
+        assertThat(overturned).containsEntry("workStatus", Work.Status.PENDING)
+                .containsEntry("state", WorkModerationTicket.State.QUEUED);
+        Work after = works.byId(workId);
+        assertThat(after.status).isEqualTo(Work.Status.PENDING);
+        assertThat(after.reviewedAt).isEqualTo(firstReviewedAt);
+        assertThat(works.publicWorks(10)).isEmpty();
+        assertThat(works.occupyingWork(authorId).id).isEqualTo(workId);
+        assertThat(tickets.byId(queued.id).appealAt).isNotNull();
+
+        WorkModerationTicket again = tickets.activeByWork(workId);
+        assertThat(again.id).isEqualTo(queued.id);
+        Map<String, Object> passed = call(REVIEWER, "POST", "/admin/moderation/" + again.id + "/handle",
+                body("action", "approve", "expectedStateVersion", again.stateVersion));
+        assertThat(passed).containsEntry("workStatus", Work.Status.PUBLIC)
+                .containsEntry("reviewedAt", firstReviewedAt);
+    }
+
+    @Test
+    void overturnFailsClosedWhenAnotherWorkOccupiesSlot() throws Exception {
+        Map<String, Object> first = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "第一条", "body", "驳回后申"));
+        long firstId = Long.parseLong(String.valueOf(first.get("workId")));
+        WorkModerationTicket ticket = tickets.activeByWork(firstId);
+        call(REVIEWER, "POST", "/admin/moderation/" + ticket.id + "/handle",
+                body("action", "reject", "expectedStateVersion", ticket.stateVersion, "reasonCode", "policy"));
+        call(authorId, "POST", "/works/" + firstId + "/appeal", body("text", "请再看"));
+
+        resources.record("media-2", authorId, "media-2", "image/jpeg", 12, 1);
+        Map<String, Object> second = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-2", "title", "第二条", "body", "占着名额"));
+        long secondId = Long.parseLong(String.valueOf(second.get("workId")));
+        assertThat(works.occupyingWork(authorId).id).isEqualTo(secondId);
+
+        WorkModerationTicket appealing = tickets.byId(ticket.id);
+        assertThatThrownBy(() -> call(SUPERVISOR, "POST", "/admin/appeals/" + ticket.id + "/handle",
+                body("action", "overturn", "expectedStateVersion", appealing.stateVersion)))
+                .isInstanceOfSatisfying(ApiException.class, ex -> {
+                    assertThat(ex.detail()).isEqualTo("submission_slot_occupied");
+                    assertThat(ex.code()).isEqualTo(ApiException.RULE_FORBIDDEN);
+                });
+        assertThat(works.byId(firstId).status).isEqualTo(Work.Status.APPEALING);
+        assertThat(works.byId(secondId).status).isEqualTo(Work.Status.PENDING);
+    }
+
+    @Test
+    void resubmitAfterRejectStillSeesPriorAppeal() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "先申", "body", "再提"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        WorkModerationTicket first = tickets.activeByWork(workId);
+        call(REVIEWER, "POST", "/admin/moderation/" + first.id + "/handle",
+                body("action", "reject", "expectedStateVersion", first.stateVersion, "reasonCode", "policy"));
+        call(authorId, "POST", "/works/" + workId + "/appeal", body("text", "先申一次"));
+        WorkModerationTicket appealing = tickets.byId(first.id);
+        call(SUPERVISOR, "POST", "/admin/appeals/" + first.id + "/handle",
+                body("action", "uphold", "expectedStateVersion", appealing.stateVersion));
+
+        call(authorId, "PUT", "/works/" + workId + "/draft", body("title", "改过", "body", "再提"));
+        call(authorId, "POST", "/works/" + workId + "/resubmit",
+                body("contentVersion", 2, "idempotencyKey", "again"));
+        WorkModerationTicket second = tickets.activeByWork(workId);
+        call(REVIEWER, "POST", "/admin/moderation/" + second.id + "/handle",
+                body("action", "reject", "expectedStateVersion", second.stateVersion, "reasonCode", "policy"));
+
+        Map<String, Object> mine = call(authorId, "GET", "/works/" + workId + "/moderation", null);
+        assertThat(mine).containsEntry("appealUsed", true).containsEntry("appealable", false);
+        assertThatThrownBy(() -> call(authorId, "POST", "/works/" + workId + "/appeal",
+                body("text", "第二次")))
+                .isInstanceOfSatisfying(ApiException.class,
+                        ex -> assertThat(ex.detail()).isEqualTo("appeal_already_used"));
+    }
+
+    @Test
+    void pendingCannotAppeal() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "待审", "body", "不能申"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        assertThatThrownBy(() -> call(authorId, "POST", "/works/" + workId + "/appeal",
+                body("text", "还没判")))
+                .isInstanceOfSatisfying(ApiException.class, ex -> {
+                    assertThat(ex.code()).isEqualTo(ModerationStateMachine.ERR_APPEAL_NOT_APPLICABLE);
+                    assertThat(ex.detail()).isEqualTo("appeal_not_applicable");
+                });
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> call(long accountId, String method, String path, JsonObject body)
             throws Exception {
         String route = path.contains("?") ? path.substring(0, path.indexOf('?')) : path;
-        Map<String, String> query = Map.of();
+        Map<String, String> query = new LinkedHashMap<>();
         if (path.contains("?")) {
-            String[] pair = path.substring(path.indexOf('?') + 1).split("=");
-            query = Map.of(pair[0], pair[1]);
+            for (String part : path.substring(path.indexOf('?') + 1).split("&")) {
+                int eq = part.indexOf('=');
+                if (eq > 0) {
+                    query.put(part.substring(0, eq), part.substring(eq + 1));
+                }
+            }
         }
         Router.Match match = router.match(method, route);
         assertThat(match).isNotNull();

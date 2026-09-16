@@ -1478,7 +1478,7 @@ CREATE TABLE IF NOT EXISTS "t_work_moderation" (
     "createdAt"      bigint      NOT NULL DEFAULT 0,
     PRIMARY KEY ("id"),
     CONSTRAINT "t_work_moderation_ck_state" CHECK ("state" IN
-        ('queued','assigned','reviewing','approved','rejected','cancelled','takendown')),
+        ('queued','assigned','reviewing','approved','rejected','cancelled','takendown','appealing')),
     CONSTRAINT "t_work_moderation_fk_work" FOREIGN KEY ("workId")
         REFERENCES "t_work" ("id") ON DELETE RESTRICT
 );
@@ -1491,7 +1491,39 @@ CREATE INDEX IF NOT EXISTS "t_work_moderation_idx_state_created"
     ON "t_work_moderation" ("state", "createdAt");
 ALTER TABLE "t_work_moderation" DROP CONSTRAINT IF EXISTS "t_work_moderation_ck_state";
 ALTER TABLE "t_work_moderation" ADD CONSTRAINT "t_work_moderation_ck_state"
-    CHECK ("state" IN ('queued','assigned','reviewing','approved','rejected','cancelled','takendown'));
+    CHECK ("state" IN ('queued','assigned','reviewing','approved','rejected','cancelled','takendown','appealing'));
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "appealText" varchar(200);
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "appealAt" bigint;
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "preAppealStatus" varchar(16);
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "appealResult" varchar(16);
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "appealHandledBy" bigint;
+ALTER TABLE "t_work_moderation" ADD COLUMN IF NOT EXISTS "appealHandledAt" bigint;
+ALTER TABLE "t_work_moderation" DROP CONSTRAINT IF EXISTS "t_work_moderation_ck_appeal_result";
+ALTER TABLE "t_work_moderation" ADD CONSTRAINT "t_work_moderation_ck_appeal_result"
+    CHECK ("appealResult" IS NULL OR "appealResult" IN ('uphold','overturn'));
+-- 申诉中也是未完结工单：挡住同作品在申诉期间再开一张 queued。
+DROP INDEX IF EXISTS "t_work_moderation_uk_work_active";
+CREATE UNIQUE INDEX IF NOT EXISTS "t_work_moderation_uk_work_active"
+    ON "t_work_moderation" ("workId")
+    WHERE "state" IN ('queued','assigned','reviewing','appealing');
+CREATE INDEX IF NOT EXISTS "t_work_moderation_idx_appeal_at"
+    ON "t_work_moderation" ("appealAt") WHERE "appealAt" IS NOT NULL;
+-- appealAt 一经写入不可变更；推翻原判也不退还申诉机会（DECISIONS MOD2）。
+CREATE OR REPLACE FUNCTION "t_work_moderation_guard_appeal_at"() RETURNS trigger AS $$
+BEGIN
+    IF OLD."appealAt" IS NOT NULL
+       AND NEW."appealAt" IS DISTINCT FROM OLD."appealAt" THEN
+        RAISE EXCEPTION 't_work_moderation.appealAt 首次写入后不可变更（% -> %）：'
+                        '它是「一条作品一生只能申诉一次」的唯一判据',
+                        OLD."appealAt", NEW."appealAt";
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS "t_work_moderation_trg_appeal_at" ON "t_work_moderation";
+CREATE TRIGGER "t_work_moderation_trg_appeal_at"
+    BEFORE UPDATE ON "t_work_moderation"
+    FOR EACH ROW EXECUTE FUNCTION "t_work_moderation_guard_appeal_at"();
 
 -- ============================================================
 -- 素材归属（t_resource）
@@ -1864,5 +1896,6 @@ VALUES (2026083101, 1788177600000),
        (2026091405, 1789387200000),
        (2026091406, 1789390800000),
        (2026091407, 1789394400000),
-       (2026091408, 1789398000000)
+       (2026091408, 1789398000000),
+       (2026091409, 1789401600000)
 ON CONFLICT ("version") DO NOTHING;

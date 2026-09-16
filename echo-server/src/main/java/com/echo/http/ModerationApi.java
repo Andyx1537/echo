@@ -17,6 +17,7 @@ import com.echo.http.work.Work;
 import com.echo.http.work.WorkModerationStore;
 import com.echo.http.work.WorkModerationTicket;
 import com.echo.http.work.WorkStore;
+import com.echo.http.work.WorkSubmissionSlot;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -174,6 +175,9 @@ public final class ModerationApi {
         }
         String reasonCode = Json.getString(ctx.body(), "reasonCode", null);
         String note = Json.getString(ctx.body(), "note", null);
+        if (workTickets != null && workTickets.byId(moderationId) != null) {
+            return handleWorkAppeal(moderationId, action, reasonCode, note, ctx);
+        }
         return applyModeratorAction(moderationId, action, reasonCode, note, ctx.accountId());
     }
 
@@ -399,7 +403,7 @@ public final class ModerationApi {
         }
         long cursor = parseLong(ctx.query("cursor", "0"), 0L);
         int limit = clampLimit(ctx.queryInt("limit", DEFAULT_LIMIT));
-        List<WorkModerationTicket> tickets = workTickets.queue(cursor, limit);
+        List<WorkModerationTicket> tickets = workTickets.queue(cursor, limit, ctx.query("tab", null));
         List<Object> items = new ArrayList<>(tickets.size());
         for (WorkModerationTicket t : tickets) {
             items.add(workQueueItem(t, works == null ? null : works.byId(t.workId)));
@@ -419,6 +423,63 @@ public final class ModerationApi {
         data.put("contentVersion", t.contentVersion);
         data.put("stateVersion", t.stateVersion);
         data.put("targetType", "work");
+        if (t.appealAt != null) {
+            Map<String, Object> appeal = Json.map();
+            appeal.put("appealId", String.valueOf(t.id));
+            appeal.put("text", t.appealText);
+            appeal.put("appealAt", t.appealAt);
+            appeal.put("result", t.appealResult);
+            appeal.put("handledAt", t.appealHandledAt);
+            data.put("appeal", appeal);
+        }
+        return data;
+    }
+
+    private Object handleWorkAppeal(long moderationId, String action, String reasonCode, String note,
+                                    RequestContext ctx) {
+        int expected = Json.getInt(ctx.body(), "expectedStateVersion", -1);
+        if (expected < 1) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "先刷新一下再处理。", "missing field: expectedStateVersion");
+        }
+        WorkModerationStore.HandleCommand cmd = new WorkModerationStore.HandleCommand();
+        cmd.moderationId = moderationId;
+        cmd.expectedStateVersion = expected;
+        cmd.action = action;
+        cmd.operatorId = ctx.accountId();
+        cmd.reasonCode = reasonCode;
+        cmd.note = note;
+        cmd.now = System.currentTimeMillis();
+        WorkModerationStore.HandleResult result = workTickets.handleAppeal(works, cmd);
+        if (result != null && WorkModerationStore.FAIL_SLOT.equals(result.failDetail)) {
+            WorkModerationTicket ticket = workTickets.byId(moderationId);
+            Work current = works == null || ticket == null ? null : works.byId(ticket.workId);
+            Work occupying = current == null || works == null ? null : works.occupyingWork(current.authorId);
+            throw new ApiException(ApiException.RULE_FORBIDDEN,
+                    "还有一条作品正在处理，先等它走完再改这一条。",
+                    "submission_slot_occupied",
+                    Map.of("submissionCapability", WorkSubmissionSlot.capability(occupying)));
+        }
+        if (result == null || result.failDetail != null) {
+            WorkModerationTicket current = workTickets.byId(moderationId);
+            throw new ApiException(ModerationStateMachine.ERR_STATE_CONFLICT,
+                    "这条已经有人处理过了，刷新看看？",
+                    "moderation_state_conflict",
+                    Map.of("moderationId", String.valueOf(moderationId),
+                            "currentState", current == null ? "" : current.state,
+                            "currentStateVersion", current == null ? 0 : current.stateVersion,
+                            "retryable", false));
+        }
+        Map<String, Object> data = Json.map();
+        data.put("moderationId", String.valueOf(result.moderationId));
+        data.put("workId", String.valueOf(result.workId));
+        data.put("appealId", String.valueOf(result.moderationId));
+        data.put("targetType", "work");
+        data.put("state", result.state);
+        data.put("workStatus", result.workStatus);
+        data.put("reviewedAt", result.reviewedAt);
+        data.put("handledAt", result.handledAt);
+        data.put("stateVersion", result.stateVersion);
         return data;
     }
 
