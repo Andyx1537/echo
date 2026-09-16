@@ -13,6 +13,10 @@ import com.echo.http.model.ModerationModels.ModerationState;
 import com.echo.http.model.ModerationModels.ModerationTicket;
 import com.echo.http.model.ModerationModels.Report;
 import com.echo.http.store.ModerationStore;
+import com.echo.http.work.Work;
+import com.echo.http.work.WorkModerationStore;
+import com.echo.http.work.WorkModerationTicket;
+import com.echo.http.work.WorkStore;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -54,11 +58,18 @@ public final class ModerationApi {
     private final ModerationStore store;
     private final AdminRoles adminRoles;
     private final IDGenerator idGenerator;
+    private WorkStore works;
+    private WorkModerationStore workTickets;
 
     public ModerationApi(ModerationStore store, AdminRoles adminRoles, IDGenerator idGenerator) {
         this.store = store;
         this.adminRoles = adminRoles;
         this.idGenerator = idGenerator;
+    }
+
+    public void setWorkModeration(WorkStore works, WorkModerationStore workTickets) {
+        this.works = works;
+        this.workTickets = workTickets;
     }
 
     /** 把 8 条路由挂到 router 上（base path {@code /api/v1} 由网关剥离）。 */
@@ -80,6 +91,9 @@ public final class ModerationApi {
     /** {@code GET /admin/moderation/queue} —— 四 tab 队列，待处理 + 高风险优先。 */
     private Object queue(RequestContext ctx) {
         adminRoles.requireRead(ctx.accountId());
+        if ("work".equals(ctx.query("targetType", "card"))) {
+            return workQueue(ctx);
+        }
         String tab = ctx.query("tab", "pending");
         String risk = ctx.query("risk", null);
         long cursor = parseLong(ctx.query("cursor", "0"), 0L);
@@ -97,7 +111,11 @@ public final class ModerationApi {
     /** {@code GET /admin/moderation/:id} —— 单条详情（含历次处置流水）。 */
     private Object detail(RequestContext ctx) {
         adminRoles.requireRead(ctx.accountId());
-        ModerationTicket t = requireTicket(parseLong(ctx.path("id"), 0L));
+        long moderationId = parseLong(ctx.path("id"), 0L);
+        if (workTickets != null && workTickets.byId(moderationId) != null) {
+            return workDetail(moderationId);
+        }
+        ModerationTicket t = requireTicket(moderationId);
         MemoryCard c = store.card(t.cardId);
 
         Map<String, Object> data = queueItem(t, c);
@@ -135,6 +153,9 @@ public final class ModerationApi {
         }
         String reasonCode = Json.getString(ctx.body(), "reasonCode", null);
         String note = Json.getString(ctx.body(), "note", null);
+        if (workTickets != null && workTickets.byId(moderationId) != null) {
+            return handleWork(moderationId, action, reasonCode, note, ctx);
+        }
         if (ModerationStateMachine.requiresReasonCode(action) && isBlank(reasonCode)) {
             throw new ApiException(ModerationStateMachine.ERR_REASON_REQUIRED,
                     "还差一个处置理由，选一个就好。", "reason_code_required");
@@ -370,6 +391,108 @@ public final class ModerationApi {
         data.put("state", CardStatus.APPEALING);
         data.put("createdAt", result.handledAt);
         return data;
+    }
+
+    private Object workQueue(RequestContext ctx) {
+        if (workTickets == null) {
+            return envelope(List.of(), null);
+        }
+        long cursor = parseLong(ctx.query("cursor", "0"), 0L);
+        int limit = clampLimit(ctx.queryInt("limit", DEFAULT_LIMIT));
+        List<WorkModerationTicket> tickets = workTickets.queue(cursor, limit);
+        List<Object> items = new ArrayList<>(tickets.size());
+        for (WorkModerationTicket t : tickets) {
+            items.add(workQueueItem(t, works == null ? null : works.byId(t.workId)));
+        }
+        return envelope(items, tickets.size() < limit || tickets.isEmpty()
+                ? null : String.valueOf(tickets.get(tickets.size() - 1).id));
+    }
+
+    private Object workDetail(long moderationId) {
+        WorkModerationTicket t = workTickets.byId(moderationId);
+        Work w = works == null ? null : works.byId(t.workId);
+        Map<String, Object> data = workQueueItem(t, w);
+        data.put("note", t.note);
+        data.put("handledBy", t.handledBy == null ? null : String.valueOf(t.handledBy));
+        data.put("handledAt", t.handledAt);
+        data.put("reasonCode", t.reasonCode);
+        data.put("contentVersion", t.contentVersion);
+        data.put("stateVersion", t.stateVersion);
+        data.put("targetType", "work");
+        return data;
+    }
+
+    private Object handleWork(long moderationId, String action, String reasonCode, String note,
+                              RequestContext ctx) {
+        adminRoles.requireHandle(ctx.accountId());
+        if (!WorkModerationStore.ACTION_APPROVE.equals(action)
+                && !WorkModerationStore.ACTION_REJECT.equals(action)) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "这个动作暂时用不了，换个方式试试？", "unknown action: " + action);
+        }
+        if (WorkModerationStore.ACTION_REJECT.equals(action) && isBlank(reasonCode)) {
+            throw new ApiException(ModerationStateMachine.ERR_REASON_REQUIRED,
+                    "还差一个处置理由，选一个就好。", "reason_code_required");
+        }
+        int expected = Json.getInt(ctx.body(), "expectedStateVersion", -1);
+        if (expected < 1) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "先刷新一下再处理。", "missing field: expectedStateVersion");
+        }
+        WorkModerationTicket t = workTickets.byId(moderationId);
+        WorkModerationStore.HandleCommand cmd = new WorkModerationStore.HandleCommand();
+        cmd.moderationId = moderationId;
+        cmd.expectedStateVersion = expected;
+        cmd.action = action;
+        cmd.operatorId = ctx.accountId();
+        cmd.reasonCode = reasonCode;
+        cmd.note = note;
+        cmd.now = System.currentTimeMillis();
+        WorkModerationStore.HandleResult result = workTickets.handle(works, cmd);
+        if (result == null) {
+            WorkModerationTicket current = workTickets.byId(moderationId);
+            throw new ApiException(ModerationStateMachine.ERR_STATE_CONFLICT,
+                    "这条已经有人处理过了，刷新看看？",
+                    "moderation_state_conflict",
+                    Map.of("moderationId", String.valueOf(moderationId),
+                            "currentState", current == null ? "" : current.state,
+                            "currentStateVersion", current == null ? 0 : current.stateVersion,
+                            "retryable", false));
+        }
+        Map<String, Object> data = Json.map();
+        data.put("moderationId", String.valueOf(result.moderationId));
+        data.put("workId", String.valueOf(result.workId));
+        data.put("targetType", "work");
+        data.put("state", result.state);
+        data.put("workStatus", result.workStatus);
+        data.put("reviewedAt", result.reviewedAt);
+        data.put("handledAt", result.handledAt);
+        data.put("stateVersion", result.stateVersion);
+        return data;
+    }
+
+    private Map<String, Object> workQueueItem(WorkModerationTicket t, Work w) {
+        Map<String, Object> m = Json.map();
+        m.put("moderationId", String.valueOf(t.id));
+        m.put("targetType", "work");
+        m.put("targetId", String.valueOf(t.workId));
+        m.put("workId", String.valueOf(t.workId));
+        m.put("submitBy", String.valueOf(t.submitBy));
+        m.put("state", t.state);
+        m.put("stateVersion", t.stateVersion);
+        m.put("contentVersion", t.contentVersion);
+        if (w != null) {
+            Map<String, Object> snap = Json.map();
+            snap.put("title", w.title);
+            snap.put("body", w.body);
+            snap.put("mediaKey", w.mediaKey);
+            m.put("workSnapshot", snap);
+            m.put("workStatus", w.status);
+            m.put("originType", w.originType);
+            m.put("reviewedAt", w.reviewedAt);
+        }
+        m.put("createdAt", t.createdAt);
+        return m;
     }
 
     // ================================================================ 辅助

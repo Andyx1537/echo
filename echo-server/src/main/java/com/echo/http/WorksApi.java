@@ -6,6 +6,8 @@ import com.echo.http.store.EchoStore;
 import com.echo.http.work.Work;
 import com.echo.http.work.WorkContent;
 import com.echo.http.work.WorkFavoriteStore;
+import com.echo.http.work.WorkModerationStore;
+import com.echo.http.work.WorkModerationTicket;
 import com.echo.http.work.WorkReviewDecision;
 import com.echo.http.work.WorkReviewEvidence;
 import com.echo.http.work.WorkReviewEvidenceStore;
@@ -66,6 +68,7 @@ public final class WorksApi {
     /** 卡归属。从回忆卡发布时判这张卡是不是本人的。 */
     private com.echo.http.store.ModerationStore cards;
     private WorkReviewEvidenceStore reviewEvidence = new WorkReviewEvidenceStore(null);
+    private WorkModerationStore workModeration;
     private WorkFavoriteStore favorites;
 
     public WorksApi(WorkStore store, EchoStore accounts, IStorage storage,
@@ -77,6 +80,7 @@ public final class WorksApi {
         this.resources = resources;
         this.safetyGate = safetyGate;
         this.idGenerator = idGenerator;
+        this.workModeration = new WorkModerationStore(null, idGenerator);
     }
 
     public void setBlockService(BlockService blockService) {
@@ -93,6 +97,11 @@ public final class WorksApi {
 
     public void setFavoriteStore(WorkFavoriteStore favorites) {
         this.favorites = favorites;
+    }
+
+    public void setWorkModerationStore(WorkModerationStore workModeration) {
+        this.workModeration = workModeration == null
+                ? new WorkModerationStore(null, idGenerator) : workModeration;
     }
 
     public void register(Router r) {
@@ -253,7 +262,7 @@ public final class WorksApi {
                 }
                 throw publishRefused("evidence_consumed");
             }
-        } else if (!store.insert(w)) {
+        } else if (!submitPending(w, now)) {
             throw insertRefused(me, w.id);
         }
         log.info("[works] 发布 id={} authorId={} mediaType={} fromCard={} ai={} reviewMode={} reason={}",
@@ -410,11 +419,12 @@ public final class WorksApi {
         }
         long now = System.currentTimeMillis();
         WorkContent.prepareResubmit(w);
-        w.lastModerationId = idGenerator.nextId();
+        WorkModerationTicket ticket = WorkModerationTicket.queued(idGenerator.nextId(), w, now);
+        w.lastModerationId = ticket.id;
         w.resubmitIdempotencyKey = key;
         w.updatedAt = now;
         w.publishedAt = now;
-        if (!store.casResubmit(w, expectedVersion)) {
+        if (!workModeration.submitResubmit(store, w, expectedVersion, ticket)) {
             Work blocker = store.occupyingWork(me);
             if (blocker != null && blocker.id != w.id) {
                 throw occupiedSlot(blocker);
@@ -536,6 +546,12 @@ public final class WorksApi {
             throw new ApiException(ApiException.BAD_PARAM,
                     "这段话里有些词不太合适，改一改再发？", "safety gate rejected");
         }
+    }
+
+    private boolean submitPending(Work w, long now) {
+        WorkModerationTicket ticket = WorkModerationTicket.queued(idGenerator.nextId(), w, now);
+        w.lastModerationId = ticket.id;
+        return workModeration.submitNew(store, w, ticket);
     }
 
     private ApiException insertRefused(long authorId, long attemptedId) {

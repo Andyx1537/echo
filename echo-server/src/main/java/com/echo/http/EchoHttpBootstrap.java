@@ -34,6 +34,7 @@ import com.echo.http.behavior.ExplicitFeedbackStore;
 import com.echo.http.work.AnonPlazaBatchStore;
 import com.echo.http.work.WorkCommentStore;
 import com.echo.http.work.WorkFavoriteStore;
+import com.echo.http.work.WorkModerationStore;
 import com.echo.http.work.WorkReviewEvidenceStore;
 import com.echo.http.work.WorkStore;
 import com.echo.http.onboarding.EchoOnboardingWindowPort;
@@ -137,7 +138,8 @@ public final class EchoHttpBootstrap {
         ModerationStore moderationStore = persistent
                 ? new PgModerationStore(pgDb, idGenerator)
                 : new InMemoryModerationStore(idGenerator);
-        new ModerationApi(moderationStore, AdminRoles.fromEnv(), idGenerator).register(router);
+        ModerationApi moderationApi = new ModerationApi(moderationStore, AdminRoles.fromEnv(), idGenerator);
+        moderationApi.register(router);
 
         // 🔴 GET /plaza 下发回忆卡（契约 C-2），以及作者侧卡列表/可见性/置顶都要读这个 store。
         //    未装配时 /plaza 返回空页 —— 刻意不回落到旧的「发宠物窗口」，那正是第二套 card
@@ -187,6 +189,9 @@ public final class EchoHttpBootstrap {
         worksApi.setBlockService(blockService);
         worksApi.setCardStore(moderationStore);
         worksApi.setReviewEvidenceStore(new WorkReviewEvidenceStore(pgDb));
+        WorkModerationStore workModeration = new WorkModerationStore(pgDb, idGenerator);
+        worksApi.setWorkModerationStore(workModeration);
+        moderationApi.setWorkModeration(workStore, workModeration);
         WorkFavoriteStore favoriteStore = new WorkFavoriteStore(pgDb);
         worksApi.setFavoriteStore(favoriteStore);
         worksApi.register(router);
