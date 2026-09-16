@@ -1462,6 +1462,34 @@ CREATE TABLE IF NOT EXISTS "t_public_review_evidence" (
 CREATE INDEX IF NOT EXISTS "t_public_review_evidence_idx_card"
     ON "t_public_review_evidence" ("sourceCardId");
 
+-- 作品审核工单。与 t_moderation（卡）分表：对象状态不能共用（API-CONTRACT 19.4）。
+CREATE TABLE IF NOT EXISTS "t_work_moderation" (
+    "id"             bigint      NOT NULL,
+    "workId"         bigint      NOT NULL,
+    "contentVersion" integer     NOT NULL DEFAULT 1,
+    "state"          varchar(16) NOT NULL DEFAULT 'queued',
+    "stateVersion"   integer     NOT NULL DEFAULT 1,
+    "submitBy"       bigint      NOT NULL DEFAULT 0,
+    "reasonCode"     varchar(32),
+    "note"           text,
+    "snapshot"       jsonb,
+    "handledBy"      bigint,
+    "handledAt"      bigint,
+    "createdAt"      bigint      NOT NULL DEFAULT 0,
+    PRIMARY KEY ("id"),
+    CONSTRAINT "t_work_moderation_ck_state" CHECK ("state" IN
+        ('queued','assigned','reviewing','approved','rejected','cancelled')),
+    CONSTRAINT "t_work_moderation_fk_work" FOREIGN KEY ("workId")
+        REFERENCES "t_work" ("id") ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_work_moderation_uk_work_version"
+    ON "t_work_moderation" ("workId", "contentVersion");
+CREATE UNIQUE INDEX IF NOT EXISTS "t_work_moderation_uk_work_active"
+    ON "t_work_moderation" ("workId")
+    WHERE "state" IN ('queued','assigned','reviewing');
+CREATE INDEX IF NOT EXISTS "t_work_moderation_idx_state_created"
+    ON "t_work_moderation" ("state", "createdAt");
+
 -- ============================================================
 -- 素材归属（t_resource）
 -- ============================================================
@@ -1831,5 +1859,6 @@ VALUES (2026083101, 1788177600000),
        (2026091403, 1789380000000),
        (2026091404, 1789383600000),
        (2026091405, 1789387200000),
-       (2026091406, 1789390800000)
+       (2026091406, 1789390800000),
+       (2026091407, 1789394400000)
 ON CONFLICT ("version") DO NOTHING;

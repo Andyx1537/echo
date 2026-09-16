@@ -50,8 +50,85 @@ public final class WorkStore {
         this.db = db;
     }
 
+    Object slotLock() {
+        return slotLock;
+    }
+
     private boolean persistent() {
         return db != null;
+    }
+
+    boolean insertOn(Connection conn, Work w) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(insertSql())) {
+            bindRow(ps, w);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    boolean casResubmitOn(Connection conn, Work w, int expectedVersion) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(casResubmitSql())) {
+            bindResubmit(ps, w, expectedVersion);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    Work byIdOn(Connection conn, long id) throws SQLException {
+        String sql = "SELECT " + COLUMNS + " FROM \"t_work\" WHERE \"id\"=? AND \"deletedAt\" IS NULL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? read(rs) : null;
+            }
+        }
+    }
+
+    /**
+     * 运营处置：只允许 {@code pending} 迁出。过审写 {@code reviewedAt} 且只写一次。
+     */
+    public boolean applyOperatorDecision(long workId, String expectedStatus, String toStatus,
+                                         boolean writeReviewedAt, long now) {
+        if (!persistent()) {
+            synchronized (slotLock) {
+                return applyOperatorDecisionMemory(workId, expectedStatus, toStatus, writeReviewedAt, now);
+            }
+        }
+        try (Connection conn = db.getConnection()) {
+            return applyOperatorDecisionOn(conn, workId, expectedStatus, toStatus, writeReviewedAt, now);
+        } catch (SQLException e) {
+            log.warn("运营处置作品失败 id={}: {}", workId, e.getMessage());
+            return false;
+        }
+    }
+
+    boolean applyOperatorDecisionOn(Connection conn, long workId, String expectedStatus,
+                                    String toStatus, boolean writeReviewedAt, long now)
+            throws SQLException {
+        String sql = "UPDATE \"t_work\" SET \"status\"=?,\"updatedAt\"=?,"
+                + "\"reviewedAt\"=CASE WHEN ? THEN COALESCE(\"reviewedAt\", ?) ELSE \"reviewedAt\" END"
+                + " WHERE \"id\"=? AND \"deletedAt\" IS NULL AND \"status\"=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, toStatus);
+            ps.setLong(2, now);
+            ps.setBoolean(3, writeReviewedAt);
+            ps.setLong(4, now);
+            ps.setLong(5, workId);
+            ps.setString(6, expectedStatus);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    private boolean applyOperatorDecisionMemory(long workId, String expectedStatus, String toStatus,
+                                               boolean writeReviewedAt, long now) {
+        Work w = memory.get(workId);
+        if (w == null || w.isDeleted() || !expectedStatus.equals(w.status)) {
+            return false;
+        }
+        w.status = toStatus;
+        w.updatedAt = now;
+        if (writeReviewedAt && w.reviewedAt == null) {
+            w.reviewedAt = now;
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ 写
@@ -219,41 +296,50 @@ public final class WorkStore {
                 return true;
             }
         }
-        String sql = "UPDATE \"t_work\" SET \"mediaType\"=?,\"mediaKey\"=?,\"posterKey\"=?,"
+        String sql = casResubmitSql();
+        try (Connection conn = db.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            bindResubmit(ps, w, expectedVersion);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            log.warn("重提作品失败 id={}: {}", w.id, e.getMessage());
+            return false;
+        }
+    }
+
+    private static String casResubmitSql() {
+        return "UPDATE \"t_work\" SET \"mediaType\"=?,\"mediaKey\"=?,\"posterKey\"=?,"
                 + "\"durationMs\"=?,\"width\"=?,\"height\"=?,\"title\"=?,\"body\"=?,"
                 + "\"visibility\"=?,\"status\"=?,\"aiGenerated\"=?,\"updatedAt\"=?,"
                 + "\"contentVersion\"=?,\"submittedContentVersion\"=?,\"contentHash\"=?,"
                 + "\"submittedContentHash\"=?,\"lastModerationId\"=?,\"resubmitIdempotencyKey\"=?"
                 + " WHERE \"id\"=? AND \"deletedAt\" IS NULL AND \"status\"='rejected'"
                 + " AND \"contentVersion\"=?";
-        try (Connection conn = db.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            int i = 1;
-            ps.setString(i++, w.mediaType);
-            ps.setString(i++, w.mediaKey);
-            ps.setString(i++, w.posterKey);
-            ps.setInt(i++, w.durationMs);
-            ps.setInt(i++, w.width);
-            ps.setInt(i++, w.height);
-            ps.setString(i++, w.title);
-            ps.setString(i++, w.body);
-            ps.setString(i++, w.visibility);
-            ps.setString(i++, w.status);
-            ps.setBoolean(i++, w.aiGenerated);
-            ps.setLong(i++, w.updatedAt);
-            ps.setInt(i++, w.contentVersion);
-            ps.setInt(i++, w.submittedContentVersion);
-            ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
-            ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
-            setNullableLong(ps, i++, w.lastModerationId);
-            ps.setString(i++, w.resubmitIdempotencyKey);
-            ps.setLong(i++, w.id);
-            ps.setInt(i, expectedVersion);
-            return ps.executeUpdate() > 0;
-        } catch (SQLException e) {
-            log.warn("重提作品失败 id={}: {}", w.id, e.getMessage());
-            return false;
-        }
+    }
+
+    private static void bindResubmit(PreparedStatement ps, Work w, int expectedVersion)
+            throws SQLException {
+        int i = 1;
+        ps.setString(i++, w.mediaType);
+        ps.setString(i++, w.mediaKey);
+        ps.setString(i++, w.posterKey);
+        ps.setInt(i++, w.durationMs);
+        ps.setInt(i++, w.width);
+        ps.setInt(i++, w.height);
+        ps.setString(i++, w.title);
+        ps.setString(i++, w.body);
+        ps.setString(i++, w.visibility);
+        ps.setString(i++, w.status);
+        ps.setBoolean(i++, w.aiGenerated);
+        ps.setLong(i++, w.updatedAt);
+        ps.setInt(i++, w.contentVersion);
+        ps.setInt(i++, w.submittedContentVersion);
+        ps.setString(i++, w.contentHash == null ? "" : w.contentHash);
+        ps.setString(i++, w.submittedContentHash == null ? "" : w.submittedContentHash);
+        setNullableLong(ps, i++, w.lastModerationId);
+        ps.setString(i++, w.resubmitIdempotencyKey);
+        ps.setLong(i++, w.id);
+        ps.setInt(i, expectedVersion);
     }
 
     // ------------------------------------------------------------------ 读
@@ -291,12 +377,6 @@ public final class WorkStore {
                 List.of(Math.max(0, limit)));
     }
 
-    /**
-     * 个人作品页。
-     *
-     * @param includeUnpublished 作者看自己时为 {@code true}（草稿与待审也要看得见）；
-     *                           🔴 陌生人看别人时<b>必须</b>为 {@code false}
-     */
     private boolean memorySlotAllows(Work w) {
         if (w == null || w.isDeleted() || !WorkSubmissionSlot.occupies(w.status)) {
             return true;
@@ -324,6 +404,12 @@ public final class WorkStore {
         return got.isEmpty() ? null : got.get(0);
     }
 
+    /**
+     * 个人作品页。
+     *
+     * @param includeUnpublished 作者看自己时为 {@code true}（草稿与待审也要看得见）；
+     *                           🔴 陌生人看别人时<b>必须</b>为 {@code false}
+     */
     public List<Work> worksOfAuthor(long authorId, boolean includeUnpublished, int limit) {
         if (!persistent()) {
             return memory.values().stream()
