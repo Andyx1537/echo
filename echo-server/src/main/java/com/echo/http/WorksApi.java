@@ -255,7 +255,10 @@ public final class WorksApi {
         if (WorkReviewDecision.MODE_REUSED.equals(decision.reviewMode)) {
             w.reviewedAt = now;
             w.reviewEvidenceId = decision.evidence.reviewEvidenceId;
-            if (!store.insertConsumingEvidence(w, reviewEvidence, decision.evidence.reviewEvidenceId)) {
+            WorkModerationTicket ticket = WorkModerationTicket.approved(idGenerator.nextId(), w, now);
+            w.lastModerationId = ticket.id;
+            if (!workModeration.submitReused(store, reviewEvidence, decision.evidence.reviewEvidenceId,
+                    w, ticket)) {
                 Work blocker = store.occupyingWork(me);
                 if (blocker != null && blocker.id != w.id) {
                     throw occupiedSlot(blocker);

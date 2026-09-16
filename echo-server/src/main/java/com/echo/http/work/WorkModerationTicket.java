@@ -15,6 +15,7 @@ public final class WorkModerationTicket {
         public static final String APPROVED = "approved";
         public static final String REJECTED = "rejected";
         public static final String CANCELLED = "cancelled";
+        public static final String TAKENDOWN = "takendown";
 
         private State() {
         }
@@ -47,6 +48,13 @@ public final class WorkModerationTicket {
         t.submitBy = work.authorId;
         t.snapshotJson = snapshot(work);
         t.createdAt = now;
+        return t;
+    }
+
+    public static WorkModerationTicket approved(long id, Work work, long now) {
+        WorkModerationTicket t = queued(id, work, now);
+        t.state = State.APPROVED;
+        t.handledAt = now;
         return t;
     }
 

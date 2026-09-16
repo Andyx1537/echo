@@ -1478,7 +1478,7 @@ CREATE TABLE IF NOT EXISTS "t_work_moderation" (
     "createdAt"      bigint      NOT NULL DEFAULT 0,
     PRIMARY KEY ("id"),
     CONSTRAINT "t_work_moderation_ck_state" CHECK ("state" IN
-        ('queued','assigned','reviewing','approved','rejected','cancelled')),
+        ('queued','assigned','reviewing','approved','rejected','cancelled','takendown')),
     CONSTRAINT "t_work_moderation_fk_work" FOREIGN KEY ("workId")
         REFERENCES "t_work" ("id") ON DELETE RESTRICT
 );
@@ -1489,6 +1489,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_work_moderation_uk_work_active"
     WHERE "state" IN ('queued','assigned','reviewing');
 CREATE INDEX IF NOT EXISTS "t_work_moderation_idx_state_created"
     ON "t_work_moderation" ("state", "createdAt");
+ALTER TABLE "t_work_moderation" DROP CONSTRAINT IF EXISTS "t_work_moderation_ck_state";
+ALTER TABLE "t_work_moderation" ADD CONSTRAINT "t_work_moderation_ck_state"
+    CHECK ("state" IN ('queued','assigned','reviewing','approved','rejected','cancelled','takendown'));
 
 -- ============================================================
 -- 素材归属（t_resource）
@@ -1860,5 +1863,6 @@ VALUES (2026083101, 1788177600000),
        (2026091404, 1789383600000),
        (2026091405, 1789387200000),
        (2026091406, 1789390800000),
-       (2026091407, 1789394400000)
+       (2026091407, 1789394400000),
+       (2026091408, 1789398000000)
 ON CONFLICT ("version") DO NOTHING;

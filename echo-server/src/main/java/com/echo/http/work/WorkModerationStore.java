@@ -28,6 +28,8 @@ public final class WorkModerationStore {
 
     public static final String ACTION_APPROVE = "approve";
     public static final String ACTION_REJECT = "reject";
+    public static final String ACTION_TAKEDOWN = "takedown";
+    public static final String ACTION_RESTORE = "restore";
 
     private final PgDb db;
     private final IDGenerator ids;
@@ -168,6 +170,43 @@ public final class WorkModerationStore {
         }
     }
 
+    /**
+     * 凭证复用直接公开：作品、凭证消费、已通过工单同事务。
+     */
+    public boolean submitReused(WorkStore works, WorkReviewEvidenceStore evidence, long evidenceId,
+                                Work work, WorkModerationTicket ticket) {
+        if (works == null || evidence == null || work == null || ticket == null) {
+            return false;
+        }
+        if (!persistent()) {
+            synchronized (works.slotLock()) {
+                synchronized (evidence.lock()) {
+                    synchronized (lock) {
+                        if (conflictsNew(ticket)) {
+                            return false;
+                        }
+                        if (!works.insertConsumingEvidence(work, evidence, evidenceId)) {
+                            return false;
+                        }
+                        memory.put(ticket.id, copyOf(ticket));
+                        return true;
+                    }
+                }
+            }
+        }
+        try {
+            return db.inTransaction(c -> {
+                if (!works.insertConsumingEvidenceOn(c, evidence, evidenceId, work)) {
+                    return false;
+                }
+                return insertOn(c, ticket);
+            });
+        } catch (SQLException e) {
+            log.warn("[work-moderation] 复用公开工单失败 workId={}: {}", work.id, e.getMessage());
+            return false;
+        }
+    }
+
     public HandleResult handle(WorkStore works, HandleCommand cmd) {
         if (works == null || cmd == null) {
             return null;
@@ -195,20 +234,16 @@ public final class WorkModerationStore {
 
     private HandleResult handleMemory(WorkStore works, HandleCommand cmd) {
         WorkModerationTicket t = memory.get(cmd.moderationId);
-        if (t == null || !WorkModerationTicket.State.active(t.state)
-                || t.stateVersion != cmd.expectedStateVersion) {
+        Transition step = transition(cmd.action);
+        if (t == null || step == null || t.stateVersion != cmd.expectedStateVersion
+                || !step.matchesTicket(t.state)) {
             return null;
         }
-        String toWork = targetWorkStatus(cmd.action);
-        String toTicket = targetTicketState(cmd.action);
-        if (toWork == null || toTicket == null) {
+        if (!works.applyOperatorDecision(t.workId, step.workFrom, step.workTo,
+                step.writeReviewedAt, cmd.now)) {
             return null;
         }
-        if (!works.applyOperatorDecision(t.workId, Work.Status.PENDING, toWork,
-                ACTION_APPROVE.equals(cmd.action), cmd.now)) {
-            return null;
-        }
-        t.state = toTicket;
+        t.state = step.ticketTo;
         t.stateVersion = t.stateVersion + 1;
         t.reasonCode = cmd.reasonCode;
         t.note = cmd.note;
@@ -224,7 +259,7 @@ public final class WorkModerationStore {
         r.moderationId = t.id;
         r.workId = t.workId;
         r.state = t.state;
-        r.workStatus = work == null ? toWork : work.status;
+        r.workStatus = work == null ? step.workTo : work.status;
         r.reviewedAt = work == null ? null : work.reviewedAt;
         r.handledAt = cmd.now;
         r.stateVersion = t.stateVersion;
@@ -234,30 +269,27 @@ public final class WorkModerationStore {
     private HandleResult handleOn(Connection conn, WorkStore works, HandleCommand cmd)
             throws SQLException {
         WorkModerationTicket t = readForUpdate(conn, cmd.moderationId);
-        if (t == null || !WorkModerationTicket.State.active(t.state)
-                || t.stateVersion != cmd.expectedStateVersion) {
+        Transition step = transition(cmd.action);
+        if (t == null || step == null || t.stateVersion != cmd.expectedStateVersion
+                || !step.matchesTicket(t.state)) {
             return null;
         }
-        String toWork = targetWorkStatus(cmd.action);
-        String toTicket = targetTicketState(cmd.action);
-        if (toWork == null || toTicket == null) {
-            return null;
-        }
-        if (!works.applyOperatorDecisionOn(conn, t.workId, Work.Status.PENDING, toWork,
-                ACTION_APPROVE.equals(cmd.action), cmd.now)) {
+        if (!works.applyOperatorDecisionOn(conn, t.workId, step.workFrom, step.workTo,
+                step.writeReviewedAt, cmd.now)) {
             return null;
         }
         String sql = "UPDATE \"t_work_moderation\" SET \"state\"=?,\"stateVersion\"=\"stateVersion\"+1,"
                 + "\"reasonCode\"=?,\"note\"=?,\"handledBy\"=?,\"handledAt\"=?"
-                + " WHERE \"id\"=? AND \"stateVersion\"=? AND \"state\" IN ('queued','assigned','reviewing')";
+                + " WHERE \"id\"=? AND \"stateVersion\"=? AND \"state\"=?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, toTicket);
+            ps.setString(1, step.ticketTo);
             ps.setString(2, cmd.reasonCode);
             ps.setString(3, cmd.note);
             ps.setLong(4, cmd.operatorId);
             ps.setLong(5, cmd.now);
             ps.setLong(6, cmd.moderationId);
             ps.setInt(7, cmd.expectedStateVersion);
+            ps.setString(8, t.state);
             if (ps.executeUpdate() == 0) {
                 return null;
             }
@@ -268,8 +300,8 @@ public final class WorkModerationStore {
         HandleResult r = new HandleResult();
         r.moderationId = cmd.moderationId;
         r.workId = t.workId;
-        r.state = after == null ? toTicket : after.state;
-        r.workStatus = work == null ? toWork : work.status;
+        r.state = after == null ? step.ticketTo : after.state;
+        r.workStatus = work == null ? step.workTo : work.status;
         r.reviewedAt = work == null ? null : work.reviewedAt;
         r.handledAt = cmd.now;
         r.stateVersion = after == null ? cmd.expectedStateVersion + 1 : after.stateVersion;
@@ -396,28 +428,90 @@ public final class WorkModerationStore {
         return t;
     }
 
-    static String targetWorkStatus(String action) {
-        if (ACTION_APPROVE.equals(action)) {
-            return Work.Status.PUBLIC;
-        }
-        if (ACTION_REJECT.equals(action)) {
-            return Work.Status.REJECTED;
-        }
-        return null;
+    public static boolean knownAction(String action) {
+        return transition(action) != null;
     }
 
-    static String targetTicketState(String action) {
-        if (ACTION_APPROVE.equals(action)) {
-            return WorkModerationTicket.State.APPROVED;
-        }
-        if (ACTION_REJECT.equals(action)) {
-            return WorkModerationTicket.State.REJECTED;
-        }
-        return null;
+    public static boolean requiresReason(String action) {
+        return ACTION_REJECT.equals(action) || ACTION_TAKEDOWN.equals(action);
     }
 
     static String auditAction(String action) {
-        return ACTION_APPROVE.equals(action) ? "moderation.approve" : "moderation.reject";
+        if (ACTION_APPROVE.equals(action)) {
+            return "moderation.approve";
+        }
+        if (ACTION_REJECT.equals(action)) {
+            return "moderation.reject";
+        }
+        if (ACTION_TAKEDOWN.equals(action)) {
+            return "moderation.takedown";
+        }
+        if (ACTION_RESTORE.equals(action)) {
+            return "moderation.restore";
+        }
+        return "moderation.unknown";
+    }
+
+    private static Transition transition(String action) {
+        if (ACTION_APPROVE.equals(action)) {
+            return Transition.active(Work.Status.PENDING, Work.Status.PUBLIC,
+                    WorkModerationTicket.State.APPROVED, true);
+        }
+        if (ACTION_REJECT.equals(action)) {
+            return Transition.active(Work.Status.PENDING, Work.Status.REJECTED,
+                    WorkModerationTicket.State.REJECTED, false);
+        }
+        if (ACTION_TAKEDOWN.equals(action)) {
+            return Transition.of(WorkModerationTicket.State.APPROVED, Work.Status.PUBLIC,
+                    Work.Status.TAKENDOWN, WorkModerationTicket.State.TAKENDOWN, false);
+        }
+        if (ACTION_RESTORE.equals(action)) {
+            return Transition.of(WorkModerationTicket.State.TAKENDOWN, Work.Status.TAKENDOWN,
+                    Work.Status.PUBLIC, WorkModerationTicket.State.APPROVED, false);
+        }
+        return null;
+    }
+
+    private static final class Transition {
+        final String[] ticketFrom;
+        final boolean activeFrom;
+        final String workFrom;
+        final String workTo;
+        final String ticketTo;
+        final boolean writeReviewedAt;
+
+        private Transition(String[] ticketFrom, boolean activeFrom, String workFrom,
+                           String workTo, String ticketTo, boolean writeReviewedAt) {
+            this.ticketFrom = ticketFrom;
+            this.activeFrom = activeFrom;
+            this.workFrom = workFrom;
+            this.workTo = workTo;
+            this.ticketTo = ticketTo;
+            this.writeReviewedAt = writeReviewedAt;
+        }
+
+        static Transition active(String workFrom, String workTo, String ticketTo,
+                                 boolean writeReviewedAt) {
+            return new Transition(new String[0], true, workFrom, workTo, ticketTo, writeReviewedAt);
+        }
+
+        static Transition of(String ticketFrom, String workFrom, String workTo,
+                             String ticketTo, boolean writeReviewedAt) {
+            return new Transition(new String[]{ticketFrom}, false, workFrom, workTo, ticketTo,
+                    writeReviewedAt);
+        }
+
+        boolean matchesTicket(String state) {
+            if (activeFrom) {
+                return WorkModerationTicket.State.active(state);
+            }
+            for (String allowed : ticketFrom) {
+                if (allowed.equals(state)) {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 
     public static final class HandleCommand {

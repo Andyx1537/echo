@@ -147,14 +147,14 @@ public final class ModerationApi {
         adminRoles.requireHandle(ctx.accountId());
         long moderationId = parseLong(ctx.path("id"), 0L);
         String action = Json.requireString(ctx.body(), "action");
-        if (!ModerationStateMachine.isModeratorAction(action)) {
-            throw new ApiException(ApiException.BAD_PARAM,
-                    "这个动作暂时用不了，换个方式试试？", "unknown action: " + action);
-        }
         String reasonCode = Json.getString(ctx.body(), "reasonCode", null);
         String note = Json.getString(ctx.body(), "note", null);
         if (workTickets != null && workTickets.byId(moderationId) != null) {
             return handleWork(moderationId, action, reasonCode, note, ctx);
+        }
+        if (!ModerationStateMachine.isModeratorAction(action)) {
+            throw new ApiException(ApiException.BAD_PARAM,
+                    "这个动作暂时用不了，换个方式试试？", "unknown action: " + action);
         }
         if (ModerationStateMachine.requiresReasonCode(action) && isBlank(reasonCode)) {
             throw new ApiException(ModerationStateMachine.ERR_REASON_REQUIRED,
@@ -425,12 +425,11 @@ public final class ModerationApi {
     private Object handleWork(long moderationId, String action, String reasonCode, String note,
                               RequestContext ctx) {
         adminRoles.requireHandle(ctx.accountId());
-        if (!WorkModerationStore.ACTION_APPROVE.equals(action)
-                && !WorkModerationStore.ACTION_REJECT.equals(action)) {
+        if (!WorkModerationStore.knownAction(action)) {
             throw new ApiException(ApiException.BAD_PARAM,
                     "这个动作暂时用不了，换个方式试试？", "unknown action: " + action);
         }
-        if (WorkModerationStore.ACTION_REJECT.equals(action) && isBlank(reasonCode)) {
+        if (WorkModerationStore.requiresReason(action) && isBlank(reasonCode)) {
             throw new ApiException(ModerationStateMachine.ERR_REASON_REQUIRED,
                     "还差一个处置理由，选一个就好。", "reason_code_required");
         }
