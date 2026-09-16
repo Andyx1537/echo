@@ -4,10 +4,16 @@ import com.aengine.util.id.IDGenerator;
 import com.echo.http.model.Models.AccountProfile;
 import com.echo.http.store.InMemoryEchoStore;
 import com.echo.http.store.InMemoryModerationStore;
+import com.echo.http.model.ModerationModels.CardStatus;
+import com.echo.http.model.ModerationModels.MemoryCard;
 import com.echo.http.work.ResourceStore;
 import com.echo.http.work.Work;
+import com.echo.http.work.WorkContent;
 import com.echo.http.work.WorkModerationStore;
 import com.echo.http.work.WorkModerationTicket;
+import com.echo.http.work.WorkReviewDecision;
+import com.echo.http.work.WorkReviewEvidence;
+import com.echo.http.work.WorkReviewEvidenceStore;
 import com.echo.http.work.WorkStore;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,6 +33,8 @@ class WorkOperatorModerationTest {
     private final WorkStore works = new WorkStore(null);
     private final ResourceStore resources = new ResourceStore(null);
     private final WorkModerationStore tickets = new WorkModerationStore(null, ids);
+    private final WorkReviewEvidenceStore evidence = new WorkReviewEvidenceStore(null);
+    private final InMemoryModerationStore cards = new InMemoryModerationStore(ids);
     private Router router;
     private long authorId;
 
@@ -47,6 +55,8 @@ class WorkOperatorModerationTest {
 
         WorksApi worksApi = new WorksApi(works, accounts, null, resources, null, ids);
         worksApi.setWorkModerationStore(tickets);
+        worksApi.setCardStore(cards);
+        worksApi.setReviewEvidenceStore(evidence);
         ModerationApi moderationApi = new ModerationApi(new InMemoryModerationStore(ids),
                 AdminRoles.parse(REVIEWER + ":reviewer"), ids);
         moderationApi.setWorkModeration(works, tickets);
@@ -142,6 +152,80 @@ class WorkOperatorModerationTest {
                 body("action", "approve", "expectedStateVersion", second.stateVersion));
         assertThat(approved).containsEntry("workStatus", Work.Status.PUBLIC);
         assertThat(works.publicWorks(10)).extracting(w -> w.id).containsExactly(workId);
+    }
+
+    @Test
+    void takedownLeavesPlazaAndRestoreKeepsFirstReviewedAt() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "过审", "body", "再下"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        WorkModerationTicket queued = tickets.activeByWork(workId);
+        Map<String, Object> approved = call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "approve", "expectedStateVersion", queued.stateVersion));
+        Long firstReviewedAt = (Long) approved.get("reviewedAt");
+        int version = ((Number) approved.get("stateVersion")).intValue();
+
+        assertThatThrownBy(() -> call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "takedown", "expectedStateVersion", version)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        ex -> assertThat(ex.detail()).isEqualTo("reason_code_required"));
+
+        Map<String, Object> down = call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "takedown", "expectedStateVersion", version, "reasonCode", "policy"));
+        assertThat(down).containsEntry("state", WorkModerationTicket.State.TAKENDOWN)
+                .containsEntry("workStatus", Work.Status.TAKENDOWN);
+        assertThat(works.publicWorks(10)).isEmpty();
+        assertThat(works.byId(workId).reviewedAt).isEqualTo(firstReviewedAt);
+
+        int downVersion = ((Number) down.get("stateVersion")).intValue();
+        Map<String, Object> restored = call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "restore", "expectedStateVersion", downVersion));
+        assertThat(restored).containsEntry("state", WorkModerationTicket.State.APPROVED)
+                .containsEntry("workStatus", Work.Status.PUBLIC)
+                .containsEntry("reviewedAt", firstReviewedAt);
+        assertThat(works.publicWorks(10)).extracting(w -> w.id).containsExactly(workId);
+        assertThat(works.byId(workId).reviewedAt).isEqualTo(firstReviewedAt);
+    }
+
+    @Test
+    void reusedPublicGetsATicketAndCanBeTakenDown() throws Exception {
+        long cardId = ids.nextId();
+        MemoryCard card = new MemoryCard();
+        card.id = cardId;
+        card.ownerId = authorId;
+        card.coverKey = "media-1";
+        card.title = "原标题";
+        card.body = "原文";
+        card.status = CardStatus.PUBLIC;
+        card.originType = "user";
+        cards.putCard(card);
+        Work hash = new Work();
+        hash.mediaType = Work.MediaType.IMAGE;
+        hash.mediaKey = "media-1";
+        hash.title = "原标题";
+        hash.body = "原文";
+        long evidenceId = ids.nextId();
+        evidence.put(WorkReviewEvidence.passed(evidenceId, cardId, authorId,
+                WorkContent.reviewHash(hash), System.currentTimeMillis()));
+
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "原标题", "body", "原文",
+                        "sourceCardId", String.valueOf(cardId),
+                        "reviewEvidenceId", String.valueOf(evidenceId)));
+        assertThat(published).containsEntry("status", Work.Status.PUBLIC)
+                .containsEntry("reviewMode", WorkReviewDecision.MODE_REUSED);
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        Work created = works.byId(workId);
+        assertThat(created.lastModerationId).isNotNull();
+        WorkModerationTicket ticket = tickets.byId(created.lastModerationId);
+        assertThat(ticket.state).isEqualTo(WorkModerationTicket.State.APPROVED);
+        assertThat(works.publicWorks(10)).extracting(w -> w.id).containsExactly(workId);
+
+        Map<String, Object> down = call(REVIEWER, "POST", "/admin/moderation/" + ticket.id + "/handle",
+                body("action", "takedown", "expectedStateVersion", ticket.stateVersion,
+                        "reasonCode", "policy"));
+        assertThat(down).containsEntry("workStatus", Work.Status.TAKENDOWN);
+        assertThat(works.publicWorks(10)).isEmpty();
     }
 
     @SuppressWarnings("unchecked")

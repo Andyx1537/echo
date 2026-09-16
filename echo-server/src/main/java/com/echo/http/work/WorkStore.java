@@ -179,19 +179,19 @@ public final class WorkStore {
             }
         }
         try {
-            return db.inTransaction(c -> {
-                if (!evidence.tryConsume(c, evidenceId, w.id)) {
-                    return false;
-                }
-                try (PreparedStatement ps = c.prepareStatement(insertSql())) {
-                    bindRow(ps, w);
-                    return ps.executeUpdate() > 0;
-                }
-            });
+            return db.inTransaction(c -> insertConsumingEvidenceOn(c, evidence, evidenceId, w));
         } catch (SQLException e) {
             log.warn("插入作品并消费凭证失败 id={} evidenceId={}: {}", w.id, evidenceId, e.getMessage());
             return false;
         }
+    }
+
+    boolean insertConsumingEvidenceOn(Connection conn, WorkReviewEvidenceStore evidence,
+                                      long evidenceId, Work w) throws SQLException {
+        if (!evidence.tryConsume(conn, evidenceId, w.id)) {
+            return false;
+        }
+        return insertOn(conn, w);
     }
 
     /**
