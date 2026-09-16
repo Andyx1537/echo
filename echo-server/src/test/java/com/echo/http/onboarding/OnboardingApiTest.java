@@ -143,6 +143,16 @@ class OnboardingApiTest {
     }
 
     @Test
+    void profileActionIsOfferedWhileCollectingAndDroppedAfterCandidates() throws Exception {
+        Map<String, Object> created = call("POST", "/pet/onboarding", new JsonObject(), "create-profile-gate");
+        String id = (String) created.get("onboardingId");
+        assertThat(created.get("allowedActions").toString()).contains("update_profile");
+        String readyId = readyWithCandidate();
+        assertThat(OnboardingViews.snapshot(repository.find(readyId)).get("allowedActions").toString())
+                .doesNotContain("update_profile");
+    }
+
+    @Test
     void rejectsUnknownOptionAndStaleVersion() throws Exception {
         Map<String, Object> created = call("POST", "/pet/onboarding", new JsonObject(), "create-x");
         String id = (String) created.get("onboardingId");

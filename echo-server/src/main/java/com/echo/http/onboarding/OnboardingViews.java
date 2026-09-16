@@ -82,11 +82,11 @@ public final class OnboardingViews {
         if ("confirmed".equals(s.status) || "abandoned".equals(s.status)) return List.of();
         List<String> actions = new ArrayList<>();
         if ("collecting".equals(s.status)) {
-            actions.addAll(List.of("upload_asset", "select_subject", "save_answer", "abandon"));
+            actions.addAll(List.of("upload_asset", "select_subject", "save_answer", "update_profile", "abandon"));
         } else if ("ready_to_bind".equals(s.status)) {
-            actions.addAll(List.of("bind_phone", "save_answer", "abandon"));
+            actions.addAll(List.of("bind_phone", "save_answer", "update_profile", "abandon"));
         } else if ("ready_to_generate".equals(s.status)) {
-            actions.addAll(List.of("generate", "save_answer", "abandon"));
+            actions.addAll(List.of("generate", "save_answer", "update_profile", "abandon"));
         } else if ("candidate_ready".equals(s.status)) {
             actions.addAll(List.of("select_candidate", "refine", "abandon"));
             if (s.selectedCandidateId != null) actions.add("set_consent");
