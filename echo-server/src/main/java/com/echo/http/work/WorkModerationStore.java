@@ -25,11 +25,20 @@ public final class WorkModerationStore {
 
     private static final String COLUMNS = "\"id\",\"workId\",\"contentVersion\",\"state\",\"stateVersion\","
             + "\"submitBy\",\"reasonCode\",\"note\",\"snapshot\",\"handledBy\",\"handledAt\",\"createdAt\"";
+    private static final String SELECT_COLUMNS = COLUMNS
+            + ",\"appealText\",\"appealAt\",\"preAppealStatus\",\"appealResult\","
+            + "\"appealHandledBy\",\"appealHandledAt\"";
 
     public static final String ACTION_APPROVE = "approve";
     public static final String ACTION_REJECT = "reject";
     public static final String ACTION_TAKEDOWN = "takedown";
     public static final String ACTION_RESTORE = "restore";
+    public static final String ACTION_APPEAL = "appeal";
+    public static final String ACTION_UPHOLD = "uphold";
+    public static final String ACTION_OVERTURN = "overturn";
+    public static final String FAIL_USED = "appeal_already_used";
+    public static final String FAIL_NOT_APPLICABLE = "appeal_not_applicable";
+    public static final String FAIL_SLOT = "submission_slot_occupied";
 
     private final PgDb db;
     private final IDGenerator ids;
@@ -52,7 +61,7 @@ public final class WorkModerationStore {
                 return copyOf(memory.get(id));
             }
         }
-        return queryOne("SELECT " + COLUMNS + " FROM \"t_work_moderation\" WHERE \"id\"=?", id);
+        return queryOne("SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\" WHERE \"id\"=?", id);
     }
 
     public WorkModerationTicket activeByWork(long workId) {
@@ -65,16 +74,48 @@ public final class WorkModerationStore {
                         .orElse(null);
             }
         }
-        return queryOne("SELECT " + COLUMNS + " FROM \"t_work_moderation\""
+        return queryOne("SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\""
                 + " WHERE \"workId\"=? AND \"state\" IN ('queued','assigned','reviewing') LIMIT 1", workId);
     }
 
+    public WorkModerationTicket lastByWork(long workId) {
+        if (!persistent()) {
+            synchronized (lock) {
+                return memory.values().stream()
+                        .filter(t -> t.workId == workId)
+                        .max(Comparator.comparingLong((WorkModerationTicket t) -> t.createdAt)
+                                .thenComparingLong(t -> t.id))
+                        .map(WorkModerationStore::copyOf)
+                        .orElse(null);
+            }
+        }
+        return queryOne("SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\""
+                + " WHERE \"workId\"=? ORDER BY \"createdAt\" DESC, \"id\" DESC LIMIT 1", workId);
+    }
+
+    public boolean appealUsed(long workId) {
+        if (!persistent()) {
+            synchronized (lock) {
+                return memory.values().stream().anyMatch(t -> t.workId == workId && t.appealUsed());
+            }
+        }
+        return queryOne("SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\""
+                + " WHERE \"workId\"=? AND \"appealAt\" IS NOT NULL LIMIT 1", workId) != null;
+    }
+
     public List<WorkModerationTicket> queue(long cursor, int limit) {
+        return queue(cursor, limit, null);
+    }
+
+    public List<WorkModerationTicket> queue(long cursor, int limit, String tab) {
+        boolean appealing = WorkModerationTicket.State.APPEALING.equals(tab);
         int cap = Math.max(0, limit);
         if (!persistent()) {
             synchronized (lock) {
                 return memory.values().stream()
-                        .filter(t -> WorkModerationTicket.State.active(t.state) && t.id > cursor)
+                        .filter(t -> t.id > cursor && (appealing
+                                ? WorkModerationTicket.State.APPEALING.equals(t.state)
+                                : WorkModerationTicket.State.active(t.state)))
                         .sorted(Comparator.comparingLong((WorkModerationTicket t) -> t.createdAt)
                                 .thenComparingLong(t -> t.id))
                         .limit(cap)
@@ -83,8 +124,11 @@ public final class WorkModerationStore {
             }
         }
         List<WorkModerationTicket> out = new ArrayList<>();
-        String sql = "SELECT " + COLUMNS + " FROM \"t_work_moderation\""
-                + " WHERE \"state\" IN ('queued','assigned','reviewing') AND \"id\">?"
+        String states = appealing
+                ? "'appealing'"
+                : "'queued','assigned','reviewing'";
+        String sql = "SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\""
+                + " WHERE \"state\" IN (" + states + ") AND \"id\">?"
                 + " ORDER BY \"createdAt\" ASC, \"id\" ASC LIMIT ?";
         try (Connection conn = db.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -226,6 +270,47 @@ public final class WorkModerationStore {
         }
     }
 
+    public HandleResult submitAppeal(WorkStore works, long workId, String text, long now) {
+        if (works == null) {
+            return failed(FAIL_NOT_APPLICABLE);
+        }
+        if (!persistent()) {
+            synchronized (works.slotLock()) {
+                synchronized (lock) {
+                    return submitAppealMemory(works, workId, text, now);
+                }
+            }
+        }
+        try {
+            return db.inTransaction(c -> submitAppealOn(c, works, workId, text, now));
+        } catch (SQLException e) {
+            log.warn("[work-moderation] 申诉失败 workId={}: {}", workId, e.getMessage());
+            return null;
+        }
+    }
+
+    public HandleResult handleAppeal(WorkStore works, HandleCommand cmd) {
+        if (works == null || cmd == null || !isAppealAction(cmd.action)) {
+            return null;
+        }
+        if (!persistent()) {
+            synchronized (works.slotLock()) {
+                synchronized (lock) {
+                    return handleAppealMemory(works, cmd);
+                }
+            }
+        }
+        try {
+            return db.inTransaction(c -> handleAppealOn(c, works, cmd));
+        } catch (SQLException e) {
+            if (uniqueViolation(e)) {
+                return failed(FAIL_SLOT);
+            }
+            log.warn("[work-moderation] 申诉处置失败 id={}: {}", cmd.moderationId, e.getMessage());
+            return null;
+        }
+    }
+
     public List<Map<String, Object>> memoryAudits() {
         synchronized (lock) {
             return List.copyOf(memoryAudits);
@@ -312,7 +397,7 @@ public final class WorkModerationStore {
         return memory.values().stream().anyMatch(existing ->
                 existing.workId == ticket.workId
                         && (existing.contentVersion == ticket.contentVersion
-                        || WorkModerationTicket.State.active(existing.state)));
+                        || WorkModerationTicket.State.inflight(existing.state)));
     }
 
     private boolean insertOn(Connection conn, WorkModerationTicket t) throws SQLException {
@@ -323,8 +408,181 @@ public final class WorkModerationStore {
         }
     }
 
+    private HandleResult submitAppealMemory(WorkStore works, long workId, String text, long now) {
+        if (appealUsedLocked(workId)) {
+            return failed(FAIL_USED);
+        }
+        Work work = works.byId(workId);
+        if (work == null || work.isDeleted() || !appealable(work.status)) {
+            return failed(FAIL_NOT_APPLICABLE);
+        }
+        WorkModerationTicket t = work.lastModerationId == null ? null : memory.get(work.lastModerationId);
+        if (t == null || t.workId != workId || !work.status.equals(t.state) || t.appealUsed()) {
+            return t != null && t.appealUsed() ? failed(FAIL_USED) : failed(FAIL_NOT_APPLICABLE);
+        }
+        String pre = work.status;
+        if (!works.applyOperatorDecision(workId, pre, Work.Status.APPEALING, false, now)) {
+            return null;
+        }
+        t.state = WorkModerationTicket.State.APPEALING;
+        t.stateVersion = t.stateVersion + 1;
+        t.appealText = text;
+        t.appealAt = now;
+        t.preAppealStatus = pre;
+        memoryAudits.add(Map.of(
+                "action", auditAction(ACTION_APPEAL),
+                "targetType", "work",
+                "targetId", String.valueOf(t.workId),
+                "moderationId", String.valueOf(t.id)));
+        return appealResult(t, Work.Status.APPEALING, works.byId(workId), now);
+    }
+
+    private HandleResult submitAppealOn(Connection conn, WorkStore works, long workId, String text, long now)
+            throws SQLException {
+        if (appealUsedOn(conn, workId)) {
+            return failed(FAIL_USED);
+        }
+        Work work = works.byIdOn(conn, workId);
+        if (work == null || work.isDeleted() || !appealable(work.status) || work.lastModerationId == null) {
+            return failed(FAIL_NOT_APPLICABLE);
+        }
+        WorkModerationTicket t = readForUpdate(conn, work.lastModerationId);
+        if (t == null || t.workId != workId || !work.status.equals(t.state) || t.appealUsed()) {
+            return t != null && t.appealUsed() ? failed(FAIL_USED) : failed(FAIL_NOT_APPLICABLE);
+        }
+        if (!works.applyOperatorDecisionOn(conn, workId, work.status, Work.Status.APPEALING, false, now)) {
+            return null;
+        }
+        String sql = "UPDATE \"t_work_moderation\" SET \"state\"=?,\"stateVersion\"=\"stateVersion\"+1,"
+                + "\"appealText\"=?,\"appealAt\"=?,\"preAppealStatus\"=?"
+                + " WHERE \"id\"=? AND \"stateVersion\"=? AND \"appealAt\" IS NULL"
+                + " AND \"state\" IN ('rejected','takendown')";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, WorkModerationTicket.State.APPEALING);
+            ps.setString(2, text);
+            ps.setLong(3, now);
+            ps.setString(4, work.status);
+            ps.setLong(5, t.id);
+            ps.setInt(6, t.stateVersion);
+            if (ps.executeUpdate() == 0) {
+                return failed(FAIL_USED);
+            }
+        }
+        HandleCommand audit = new HandleCommand();
+        audit.moderationId = t.id;
+        audit.action = ACTION_APPEAL;
+        audit.operatorId = work.authorId;
+        audit.actorType = "user";
+        audit.now = now;
+        insertAudit(conn, audit, workId);
+        Work after = works.byIdOn(conn, workId);
+        WorkModerationTicket ticket = readForUpdate(conn, t.id);
+        return appealResult(ticket, Work.Status.APPEALING, after, now);
+    }
+
+    private HandleResult handleAppealMemory(WorkStore works, HandleCommand cmd) {
+        WorkModerationTicket t = memory.get(cmd.moderationId);
+        if (t == null || t.stateVersion != cmd.expectedStateVersion
+                || !WorkModerationTicket.State.APPEALING.equals(t.state)
+                || t.preAppealStatus == null) {
+            return null;
+        }
+        String workTo;
+        String ticketTo;
+        Work current = works.byId(t.workId);
+        if (current == null || current.isDeleted()) {
+            return null;
+        }
+        if (ACTION_UPHOLD.equals(cmd.action)) {
+            workTo = t.preAppealStatus;
+            ticketTo = t.preAppealStatus;
+        } else {
+            Work occupying = works.occupyingWork(current.authorId);
+            if (occupying != null && occupying.id != t.workId) {
+                return failed(FAIL_SLOT);
+            }
+            workTo = Work.Status.PENDING;
+            ticketTo = WorkModerationTicket.State.QUEUED;
+        }
+        if (!works.applyOperatorDecision(t.workId, Work.Status.APPEALING, workTo, false, cmd.now)) {
+            return null;
+        }
+        t.state = ticketTo;
+        t.stateVersion = t.stateVersion + 1;
+        t.appealResult = cmd.action;
+        t.appealHandledBy = cmd.operatorId;
+        t.appealHandledAt = cmd.now;
+        memoryAudits.add(Map.of(
+                "action", auditAction(cmd.action),
+                "targetType", "work",
+                "targetId", String.valueOf(t.workId),
+                "moderationId", String.valueOf(t.id)));
+        return appealResult(t, workTo, works.byId(t.workId), cmd.now);
+    }
+
+    private HandleResult handleAppealOn(Connection conn, WorkStore works, HandleCommand cmd)
+            throws SQLException {
+        WorkModerationTicket t = readForUpdate(conn, cmd.moderationId);
+        if (t == null || t.stateVersion != cmd.expectedStateVersion
+                || !WorkModerationTicket.State.APPEALING.equals(t.state)
+                || t.preAppealStatus == null) {
+            return null;
+        }
+        Work work = works.byIdOn(conn, t.workId);
+        String workTo;
+        String ticketTo;
+        if (ACTION_UPHOLD.equals(cmd.action)) {
+            workTo = t.preAppealStatus;
+            ticketTo = t.preAppealStatus;
+        } else {
+            if (work != null) {
+                Work occupying = works.occupyingWorkOn(conn, work.authorId);
+                if (occupying != null && occupying.id != t.workId) {
+                    return failed(FAIL_SLOT);
+                }
+            }
+            workTo = Work.Status.PENDING;
+            ticketTo = WorkModerationTicket.State.QUEUED;
+        }
+        if (!works.applyOperatorDecisionOn(conn, t.workId, Work.Status.APPEALING, workTo, false, cmd.now)) {
+            return null;
+        }
+        String sql = "UPDATE \"t_work_moderation\" SET \"state\"=?,\"stateVersion\"=\"stateVersion\"+1,"
+                + "\"appealResult\"=?,\"appealHandledBy\"=?,\"appealHandledAt\"=?"
+                + " WHERE \"id\"=? AND \"stateVersion\"=? AND \"state\"='appealing'";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, ticketTo);
+            ps.setString(2, cmd.action);
+            ps.setLong(3, cmd.operatorId);
+            ps.setLong(4, cmd.now);
+            ps.setLong(5, cmd.moderationId);
+            ps.setInt(6, cmd.expectedStateVersion);
+            if (ps.executeUpdate() == 0) {
+                return null;
+            }
+        }
+        insertAudit(conn, cmd, t.workId);
+        Work after = works.byIdOn(conn, t.workId);
+        WorkModerationTicket ticket = readForUpdate(conn, cmd.moderationId);
+        return appealResult(ticket, workTo, after, cmd.now);
+    }
+
+    private boolean appealUsedLocked(long workId) {
+        return memory.values().stream().anyMatch(t -> t.workId == workId && t.appealUsed());
+    }
+
+    private boolean appealUsedOn(Connection conn, long workId) throws SQLException {
+        String sql = "SELECT 1 FROM \"t_work_moderation\" WHERE \"workId\"=? AND \"appealAt\" IS NOT NULL LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, workId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
     private WorkModerationTicket readForUpdate(Connection conn, long id) throws SQLException {
-        String sql = "SELECT " + COLUMNS + " FROM \"t_work_moderation\" WHERE \"id\"=? FOR UPDATE";
+        String sql = "SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\" WHERE \"id\"=? FOR UPDATE";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
             try (ResultSet rs = ps.executeQuery()) {
@@ -340,7 +598,7 @@ public final class WorkModerationStore {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, ids.nextId());
             ps.setString(2, String.valueOf(cmd.operatorId));
-            ps.setString(3, "staff");
+            ps.setString(3, cmd.actorType == null || cmd.actorType.isBlank() ? "staff" : cmd.actorType);
             ps.setString(4, auditAction(cmd.action));
             ps.setString(5, "work");
             ps.setString(6, String.valueOf(workId));
@@ -405,6 +663,15 @@ public final class WorkModerationStore {
         long handledAt = rs.getLong("handledAt");
         t.handledAt = rs.wasNull() ? null : handledAt;
         t.createdAt = rs.getLong("createdAt");
+        t.appealText = rs.getString("appealText");
+        long appealAt = rs.getLong("appealAt");
+        t.appealAt = rs.wasNull() ? null : appealAt;
+        t.preAppealStatus = rs.getString("preAppealStatus");
+        t.appealResult = rs.getString("appealResult");
+        long appealHandledBy = rs.getLong("appealHandledBy");
+        t.appealHandledBy = rs.wasNull() ? null : appealHandledBy;
+        long appealHandledAt = rs.getLong("appealHandledAt");
+        t.appealHandledAt = rs.wasNull() ? null : appealHandledAt;
         return t;
     }
 
@@ -425,7 +692,21 @@ public final class WorkModerationStore {
         t.handledBy = src.handledBy;
         t.handledAt = src.handledAt;
         t.createdAt = src.createdAt;
+        t.appealText = src.appealText;
+        t.appealAt = src.appealAt;
+        t.preAppealStatus = src.preAppealStatus;
+        t.appealResult = src.appealResult;
+        t.appealHandledBy = src.appealHandledBy;
+        t.appealHandledAt = src.appealHandledAt;
         return t;
+    }
+
+    public static boolean appealable(String status) {
+        return Work.Status.REJECTED.equals(status) || Work.Status.TAKENDOWN.equals(status);
+    }
+
+    public static boolean isAppealAction(String action) {
+        return ACTION_UPHOLD.equals(action) || ACTION_OVERTURN.equals(action);
     }
 
     public static boolean knownAction(String action) {
@@ -448,6 +729,15 @@ public final class WorkModerationStore {
         }
         if (ACTION_RESTORE.equals(action)) {
             return "moderation.restore";
+        }
+        if (ACTION_APPEAL.equals(action)) {
+            return "moderation.appeal";
+        }
+        if (ACTION_UPHOLD.equals(action)) {
+            return "moderation.appeal.uphold";
+        }
+        if (ACTION_OVERTURN.equals(action)) {
+            return "moderation.appeal.overturn";
         }
         return "moderation.unknown";
     }
@@ -522,6 +812,7 @@ public final class WorkModerationStore {
         public String reasonCode;
         public String note;
         public long now;
+        public String actorType;
     }
 
     public static final class HandleResult {
@@ -532,5 +823,41 @@ public final class WorkModerationStore {
         public Long reviewedAt;
         public long handledAt;
         public int stateVersion;
+        public String failDetail;
+    }
+
+    private static boolean uniqueViolation(SQLException e) {
+        for (SQLException sql = e; sql != null; sql = sql.getNextException()) {
+            if ("23505".equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        for (Throwable cur = e.getCause(); cur != null; cur = cur.getCause()) {
+            if (cur instanceof SQLException sql && uniqueViolation(sql)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static HandleResult failed(String detail) {
+        HandleResult r = new HandleResult();
+        r.failDetail = detail;
+        return r;
+    }
+
+    private static HandleResult appealResult(WorkModerationTicket t, String workStatus, Work work, long now) {
+        if (t == null) {
+            return null;
+        }
+        HandleResult r = new HandleResult();
+        r.moderationId = t.id;
+        r.workId = t.workId;
+        r.state = t.state;
+        r.workStatus = work == null ? workStatus : work.status;
+        r.reviewedAt = work == null ? null : work.reviewedAt;
+        r.handledAt = now;
+        r.stateVersion = t.stateVersion;
+        return r;
     }
 }

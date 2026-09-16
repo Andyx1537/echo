@@ -83,7 +83,7 @@ public final class WorkStore {
     }
 
     /**
-     * 运营处置：只允许 {@code pending} 迁出。过审写 {@code reviewedAt} 且只写一次。
+     * 运营处置：按期望状态迁出。过审写 {@code reviewedAt} 且只写一次。
      */
     public boolean applyOperatorDecision(long workId, String expectedStatus, String toStatus,
                                          boolean writeReviewedAt, long now) {
@@ -402,6 +402,19 @@ public final class WorkStore {
                         + " ORDER BY \"createdAt\" ASC LIMIT 1",
                 List.of(authorId));
         return got.isEmpty() ? null : got.get(0);
+    }
+
+    Work occupyingWorkOn(Connection conn, long authorId) throws SQLException {
+        String sql = "SELECT " + COLUMNS + " FROM \"t_work\""
+                + " WHERE \"authorId\"=? AND \"deletedAt\" IS NULL"
+                + " AND \"status\" IN ('pending','uploading','submitting')"
+                + " ORDER BY \"createdAt\" ASC LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, authorId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? read(rs) : null;
+            }
+        }
     }
 
     /**

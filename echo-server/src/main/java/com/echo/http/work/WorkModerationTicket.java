@@ -3,8 +3,8 @@ package com.echo.http.work;
 /**
  * 作品审核工单。与回忆卡 {@code t_moderation} 分表：对象状态不能共用。
  *
- * <p>活动态只有 {@code queued|assigned|reviewing}；过审、驳回、取消是终态，
- * 释放「同一作品仅一张活动工单」约束。</p>
+ * <p>审核队列活动态 {@code queued|assigned|reviewing}；申诉中另算未完结工单。
+ * 过审、驳回、下架、取消释放「同一作品仅一张未完结工单」约束。</p>
  */
 public final class WorkModerationTicket {
 
@@ -16,12 +16,18 @@ public final class WorkModerationTicket {
         public static final String REJECTED = "rejected";
         public static final String CANCELLED = "cancelled";
         public static final String TAKENDOWN = "takendown";
+        public static final String APPEALING = "appealing";
 
         private State() {
         }
 
         public static boolean active(String state) {
             return QUEUED.equals(state) || ASSIGNED.equals(state) || REVIEWING.equals(state);
+        }
+
+        /** 未完结工单：审核队列加上申诉中，挡住同作品再开一张。 */
+        public static boolean inflight(String state) {
+            return active(state) || APPEALING.equals(state);
         }
     }
 
@@ -37,6 +43,16 @@ public final class WorkModerationTicket {
     public Long handledBy;
     public Long handledAt;
     public long createdAt;
+    public String appealText;
+    public Long appealAt;
+    public String preAppealStatus;
+    public String appealResult;
+    public Long appealHandledBy;
+    public Long appealHandledAt;
+
+    public boolean appealUsed() {
+        return appealAt != null;
+    }
 
     public static WorkModerationTicket queued(long id, Work work, long now) {
         WorkModerationTicket t = new WorkModerationTicket();
