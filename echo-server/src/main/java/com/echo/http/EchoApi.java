@@ -267,6 +267,7 @@ public class EchoApi {
         r.add("GET", "/windows/:petId/remember", this::rememberWall);
         // §6 窗口/广场
         r.add("GET", "/plaza", this::plaza);
+        r.add("POST", "/plaza/immersive", this::openImmersive);
         r.add("GET", "/windows/:petId", this::windowDetail);
         r.add("POST", "/windows/:petId/seen", this::windowSeen);
 
@@ -876,14 +877,13 @@ public class EchoApi {
     public static final String PLAZA_FEED_SURFACE = FeedRequestRegistry.SURFACE_GRID;
 
     /**
-     * 全屏单卡层是否已实现。⚠️ <b>尚未实现</b>——没有任何端点用
+     * 全屏单卡层是否已实现。{@code POST /plaza/immersive} 用
      * {@link FeedRequestRegistry#SURFACE_IMMERSIVE} 登记快照。
      *
      * <p>🔴 它是 {@code n} 能不能增长的<b>第二条</b>前置（第一条是 {@link #PLAZA_FEED_KIND}）。
-     * 立成常量而不是让自检去猜，理由同 {@code PLAZA_FEED_KIND}：判据与事实要同源。
-     * 实现全屏层的那一天把它改成 {@code true}。</p>
+     * 网格 {@code GET /plaza} 仍然不记 {@code n}。</p>
      */
-    public static final boolean IMMERSIVE_FEED_IMPLEMENTED = false;
+    public static final boolean IMMERSIVE_FEED_IMPLEMENTED = true;
 
     /** 广场单页上限。 */
     private static final int PLAZA_PAGE_MAX = 20;
@@ -1238,6 +1238,40 @@ public class EchoApi {
         // 🔴 boostIds 同理为空 —— 冷启动保底位未实现，现阶段全部曝光的 viaBoost 都是 0。
         page.put("reqId", feedRequests.register(ctx.accountId(),
                 PLAZA_FEED_KIND, PLAZA_FEED_SURFACE, ids, Set.of(), "", ""));
+    }
+
+    /**
+     * 从网格那次下发新开一份全屏快照。不是第二套召回，只换层名。
+     * 网格 reqId 丢了或对不上人：进得去，不记 n。
+     */
+    private Object openImmersive(RequestContext ctx) {
+        Map<String, Object> data = Json.map();
+        if (feedRequests == null) {
+            data.put("reqId", "");
+            data.put("countsTowardExposure", false);
+            return data;
+        }
+        JsonObject body = ctx.body() == null ? new JsonObject() : ctx.body();
+        String fromReqId = Json.getString(body, "fromReqId", "");
+        FeedRequestRegistry.Snapshot grid = feedRequests.lookup(fromReqId);
+        if (grid == null
+                || grid.viewerId() != ctx.accountId()
+                || !FeedRequestRegistry.SURFACE_GRID.equals(grid.surface())) {
+            data.put("reqId", "");
+            data.put("countsTowardExposure", false);
+            return data;
+        }
+        String reqId = feedRequests.register(
+                ctx.accountId(),
+                PLAZA_FEED_KIND,
+                FeedRequestRegistry.SURFACE_IMMERSIVE,
+                grid.deliveredIdsInOrder(),
+                grid.boostIds(),
+                grid.channel(),
+                grid.pool());
+        data.put("reqId", reqId);
+        data.put("countsTowardExposure", true);
+        return data;
     }
 
     private Object windowDetail(RequestContext ctx) {
