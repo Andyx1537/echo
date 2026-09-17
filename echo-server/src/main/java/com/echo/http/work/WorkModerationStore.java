@@ -108,14 +108,11 @@ public final class WorkModerationStore {
     }
 
     public List<WorkModerationTicket> queue(long cursor, int limit, String tab) {
-        boolean appealing = WorkModerationTicket.State.APPEALING.equals(tab);
         int cap = Math.max(0, limit);
         if (!persistent()) {
             synchronized (lock) {
                 return memory.values().stream()
-                        .filter(t -> t.id > cursor && (appealing
-                                ? WorkModerationTicket.State.APPEALING.equals(t.state)
-                                : WorkModerationTicket.State.active(t.state)))
+                        .filter(t -> t.id > cursor && matchesTab(t.state, tab))
                         .sorted(Comparator.comparingLong((WorkModerationTicket t) -> t.createdAt)
                                 .thenComparingLong(t -> t.id))
                         .limit(cap)
@@ -124,9 +121,7 @@ public final class WorkModerationStore {
             }
         }
         List<WorkModerationTicket> out = new ArrayList<>();
-        String states = appealing
-                ? "'appealing'"
-                : "'queued','assigned','reviewing'";
+        String states = sqlStates(tab);
         String sql = "SELECT " + SELECT_COLUMNS + " FROM \"t_work_moderation\""
                 + " WHERE \"state\" IN (" + states + ") AND \"id\">?"
                 + " ORDER BY \"createdAt\" ASC, \"id\" ASC LIMIT ?";
@@ -143,6 +138,33 @@ public final class WorkModerationStore {
             log.warn("[work-moderation] 队列读取失败: {}", e.getMessage());
         }
         return out;
+    }
+
+    /** 默认待审；`appealing` / `public` / `takendown` 三栏另取。未知 tab 当待审，不拼进 SQL。 */
+    static boolean matchesTab(String state, String tab) {
+        if (WorkModerationTicket.State.APPEALING.equals(tab)) {
+            return WorkModerationTicket.State.APPEALING.equals(state);
+        }
+        if ("public".equals(tab) || WorkModerationTicket.State.APPROVED.equals(tab)) {
+            return WorkModerationTicket.State.APPROVED.equals(state);
+        }
+        if (WorkModerationTicket.State.TAKENDOWN.equals(tab)) {
+            return WorkModerationTicket.State.TAKENDOWN.equals(state);
+        }
+        return WorkModerationTicket.State.active(state);
+    }
+
+    private static String sqlStates(String tab) {
+        if (WorkModerationTicket.State.APPEALING.equals(tab)) {
+            return "'appealing'";
+        }
+        if ("public".equals(tab) || WorkModerationTicket.State.APPROVED.equals(tab)) {
+            return "'approved'";
+        }
+        if (WorkModerationTicket.State.TAKENDOWN.equals(tab)) {
+            return "'takendown'";
+        }
+        return "'queued','assigned','reviewing'";
     }
 
     /**
