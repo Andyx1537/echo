@@ -217,6 +217,7 @@ public final class EchoHttpBootstrap {
         FeedRequestRegistry feedRequests = new FeedRequestRegistry(exposureConfig, pgDb);
         FeedRequestRegistry.assertSingleInstance(pgDb != null);
         api.setFeedRequests(feedRequests);
+        worksApi.setFeedRequests(feedRequests);
         ExposureRecorder exposureRecorder = new ExposureRecorder(exposureConfig, feedRequests, pgDb, idGenerator);
         new ImpressionApi(exposureRecorder).register(router);
         Runtime.getRuntime().addShutdownHook(new Thread(exposureRecorder::shutdown, "echo-exposure-shutdown"));
