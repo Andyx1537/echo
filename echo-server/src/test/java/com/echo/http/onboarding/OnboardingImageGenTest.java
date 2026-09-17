@@ -119,7 +119,7 @@ class OnboardingImageGenTest {
             @Override
             public String complete(String prompt) {
                 assertThat(prompt).startsWith("private-pet-onboarding\n");
-                assertThat(prompt).contains("facts=home,tiny");
+                assertThat(prompt).contains("answers=home,tiny");
                 assertThat(prompt).doesNotContain("questionId");
                 return "It looks like you've shared a JSON array representing answers from a pet onboarding flow.";
             }
@@ -128,6 +128,27 @@ class OnboardingImageGenTest {
                 noisy, new IDGenerator(63), Runnable::run).buildCandidates(anchor, null);
         assertThat(candidates).hasSize(3).allSatisfy(candidate ->
                 assertThat(candidate.signature).isEqualTo("从熟悉的日常，慢慢认出它"));
+    }
+
+    @Test
+    void promptConsumesFourSnapshotsWithoutRawJson() {
+        OnboardingAggregate.Anchor anchor = new OnboardingAggregate.Anchor();
+        anchor.subjectSnapshot = "[{\"assetId\":\"a1\",\"modelType\":\"animal\",\"species\":\"dog\",\"userSelected\":true}]";
+        anchor.assetSnapshot = "[{\"assetId\":\"a1\",\"mediaType\":\"image\",\"resourceId\":\"pic-secret\"}]";
+        anchor.answerSnapshot = "[{\"questionId\":\"Q1\",\"answerCodes\":[\"home\"],\"freeText\":\"别把这句话送进去\"}]";
+        anchor.factSnapshot = "["
+                + "{\"dimension\":\"place\",\"value\":\"home\",\"allowedUses\":[\"private_generation\"]},"
+                + "{\"dimension\":\"mood\",\"value\":\"sad\",\"allowedUses\":[\"analytics\"]}]";
+        String prompt = ExecutorOnboardingGenerationPort.onboardingPreviewPrompt(anchor, "softer");
+        assertThat(prompt).contains("subject=animal/dog");
+        assertThat(prompt).contains("assets=image");
+        assertThat(prompt).contains("answers=home");
+        assertThat(prompt).contains("facts=place:home");
+        assertThat(prompt).contains("adjustment=softer");
+        assertThat(prompt).doesNotContain("pic-secret");
+        assertThat(prompt).doesNotContain("别把这句话送进去");
+        assertThat(prompt).doesNotContain("questionId");
+        assertThat(prompt).doesNotContain("mood:sad");
     }
 
     @Test

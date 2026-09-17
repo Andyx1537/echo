@@ -483,7 +483,7 @@ public final class OnboardingApi {
         a.assetSnapshot = GSON.toJson(s.assets);
         a.answerSnapshot = GSON.toJson(s.answers.values());
         a.factSnapshot = GSON.toJson(s.facts.stream().filter(fact -> fact.supersededAt == null).toList());
-        a.promptTemplateVersion = "private-onboarding-v1";
+        a.promptTemplateVersion = ExecutorOnboardingGenerationPort.PROMPT_TEMPLATE_VERSION;
         a.safetyDecision = "pending_provider_check";
         a.createdAt = System.currentTimeMillis();
         return a;
