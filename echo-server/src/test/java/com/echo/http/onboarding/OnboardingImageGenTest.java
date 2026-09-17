@@ -82,6 +82,15 @@ class OnboardingImageGenTest {
             assertThat(loaded).isNotNull();
             assertThat(AigcMetadataWriter.read(loaded.data())).isNotBlank();
         });
+
+        IStorage afterReopen = new LocalDiskStorage(dir.toString(), "");
+        assertThat(candidates).allSatisfy(candidate -> {
+            String key = candidate.imageUrl.substring("/api/v1/files/".length());
+            IStorage.Loaded loaded = afterReopen.load(key);
+            assertThat(loaded).isNotNull();
+            assertThat(loaded.data().length).isGreaterThan(0);
+            assertThat(AigcMetadataWriter.read(loaded.data())).isNotBlank();
+        });
     }
 
     @Test
