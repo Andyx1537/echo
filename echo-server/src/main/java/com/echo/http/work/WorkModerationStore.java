@@ -55,6 +55,19 @@ public final class WorkModerationStore {
         return db != null;
     }
 
+    /** 测试用：把内存工单的创建时间拨回去，用来验服务端 slaBreached。 */
+    public void setCreatedAt(long id, long createdAt) {
+        if (persistent()) {
+            throw new UnsupportedOperationException("setCreatedAt is memory-only");
+        }
+        synchronized (lock) {
+            WorkModerationTicket t = memory.get(id);
+            if (t != null) {
+                t.createdAt = createdAt;
+            }
+        }
+    }
+
     public WorkModerationTicket byId(long id) {
         if (!persistent()) {
             synchronized (lock) {

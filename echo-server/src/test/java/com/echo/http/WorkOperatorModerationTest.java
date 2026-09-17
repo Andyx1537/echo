@@ -87,7 +87,11 @@ class WorkOperatorModerationTest {
         assertThat(items).hasSize(1);
         assertThat(items.get(0)).containsEntry("targetType", "work")
                 .containsEntry("workId", String.valueOf(workId))
-                .containsEntry("state", WorkModerationTicket.State.QUEUED);
+                .containsEntry("state", WorkModerationTicket.State.QUEUED)
+                .containsEntry("slaBreached", false);
+        long createdAt = ((Number) items.get(0).get("createdAt")).longValue();
+        assertThat(((Number) items.get(0).get("slaDueAt")).longValue())
+                .isEqualTo(createdAt + 4 * 60 * 60 * 1000L);
         long moderationId = Long.parseLong(String.valueOf(items.get(0).get("moderationId")));
         int stateVersion = ((Number) items.get(0).get("stateVersion")).intValue();
 
@@ -402,6 +406,23 @@ class WorkOperatorModerationTest {
                 body("text", "第二次")))
                 .isInstanceOfSatisfying(ApiException.class,
                         ex -> assertThat(ex.detail()).isEqualTo("appeal_already_used"));
+    }
+
+    @Test
+    void overduePendingMarksSlaBreached() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "超时", "body", "还没人看"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        Map<String, Object> fresh = call(REVIEWER, "GET", "/admin/moderation/queue?targetType=work", null);
+        long moderationId = Long.parseLong(String.valueOf(items(fresh).get(0).get("moderationId")));
+        tickets.setCreatedAt(moderationId, System.currentTimeMillis() - 5 * 60 * 60 * 1000L);
+
+        Map<String, Object> overdue = items(call(REVIEWER, "GET",
+                "/admin/moderation/queue?targetType=work", null)).get(0);
+        assertThat(overdue).containsEntry("workId", String.valueOf(workId))
+                .containsEntry("slaBreached", true);
+        assertThat(((Number) overdue.get("slaDueAt")).longValue())
+                .isLessThan(System.currentTimeMillis());
     }
 
     @Test
