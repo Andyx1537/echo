@@ -59,9 +59,8 @@ public final class FeedRequestRegistry {
     /**
      * <b>全屏单卡层</b>——一屏一条，🔴 <b>{@code n} 只在这一层记</b>。
      *
-     * <p>⚠️ <b>该层目前尚未实现</b>（没有任何端点会用这个值登记快照）。
-     * 常量先立在这里，是为了让「哪一层记 {@code n}」这个判据有<b>单一来源</b>，
-     * 而不是等实现那天再临时决定。</p>
+     * <p>{@code POST /plaza/immersive} 用这个值登记快照。网格 {@code GET /plaza} 仍是
+     * {@link #SURFACE_GRID}，列出和滚过都不记。</p>
      */
     public static final String SURFACE_IMMERSIVE = "immersive";
 
@@ -88,6 +87,13 @@ public final class FeedRequestRegistry {
 
         public boolean contains(String id) {
             return deliveredPositions.containsKey(id);
+        }
+
+        public List<String> deliveredIdsInOrder() {
+            return deliveredPositions.entrySet().stream()
+                    .sorted(Map.Entry.comparingByValue())
+                    .map(Map.Entry::getKey)
+                    .toList();
         }
 
         /** 🔴 本次下发的曝光是否该记进 {@code n}：必须是<b>卡</b>且发在<b>全屏层</b>。 */
