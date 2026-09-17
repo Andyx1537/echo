@@ -195,6 +195,34 @@ class WorkOperatorModerationTest {
     }
 
     @Test
+    void publicAndTakendownTabsFollowHandle() throws Exception {
+        Map<String, Object> published = call(authorId, "POST", "/works",
+                body("mediaType", "image", "mediaKey", "media-1", "title", "栏", "body", "下架栏"));
+        long workId = Long.parseLong(String.valueOf(published.get("workId")));
+        WorkModerationTicket queued = tickets.activeByWork(workId);
+        assertThat(items(call(REVIEWER, "GET", "/admin/moderation/queue?targetType=work&tab=public", null)))
+                .isEmpty();
+
+        Map<String, Object> approved = call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "approve", "expectedStateVersion", queued.stateVersion));
+        List<Map<String, Object>> publicItems =
+                items(call(REVIEWER, "GET", "/admin/moderation/queue?targetType=work&tab=public", null));
+        assertThat(publicItems).hasSize(1);
+        assertThat(publicItems.get(0)).containsEntry("workId", String.valueOf(workId))
+                .containsEntry("state", WorkModerationTicket.State.APPROVED);
+
+        int version = ((Number) approved.get("stateVersion")).intValue();
+        call(REVIEWER, "POST", "/admin/moderation/" + queued.id + "/handle",
+                body("action", "takedown", "expectedStateVersion", version, "reasonCode", "policy"));
+        assertThat(items(call(REVIEWER, "GET", "/admin/moderation/queue?targetType=work&tab=public", null)))
+                .isEmpty();
+        List<Map<String, Object>> downItems =
+                items(call(REVIEWER, "GET", "/admin/moderation/queue?targetType=work&tab=takendown", null));
+        assertThat(downItems).hasSize(1);
+        assertThat(downItems.get(0)).containsEntry("state", WorkModerationTicket.State.TAKENDOWN);
+    }
+
+    @Test
     void reusedPublicGetsATicketAndCanBeTakenDown() throws Exception {
         long cardId = ids.nextId();
         MemoryCard card = new MemoryCard();
@@ -387,6 +415,11 @@ class WorkOperatorModerationTest {
                     assertThat(ex.code()).isEqualTo(ModerationStateMachine.ERR_APPEAL_NOT_APPLICABLE);
                     assertThat(ex.detail()).isEqualTo("appeal_not_applicable");
                 });
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> items(Map<String, Object> page) {
+        return (List<Map<String, Object>>) page.get("items");
     }
 
     @SuppressWarnings("unchecked")
