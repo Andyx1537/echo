@@ -1,5 +1,6 @@
 package com.echo.http;
 
+import com.echo.http.exposure.FeedRequestRegistry;
 import com.echo.http.governance.BlockService;
 import com.echo.http.safety.OutputSafetyGate;
 import com.echo.http.store.EchoStore;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 作品域端点：发布、瀑布、个人作品页、详情、删除。
@@ -70,6 +72,7 @@ public final class WorksApi {
     private WorkReviewEvidenceStore reviewEvidence = new WorkReviewEvidenceStore(null);
     private WorkModerationStore workModeration;
     private WorkFavoriteStore favorites;
+    private FeedRequestRegistry feedRequests;
 
     public WorksApi(WorkStore store, EchoStore accounts, IStorage storage,
                     com.echo.http.work.ResourceStore resources,
@@ -97,6 +100,10 @@ public final class WorksApi {
 
     public void setFavoriteStore(WorkFavoriteStore favorites) {
         this.favorites = favorites;
+    }
+
+    public void setFeedRequests(FeedRequestRegistry feedRequests) {
+        this.feedRequests = feedRequests;
     }
 
     public void setWorkModerationStore(WorkModerationStore workModeration) {
@@ -322,6 +329,8 @@ public final class WorksApi {
         Map<String, Object> out = page(items, ctx);
         if (self) {
             out.put("submissionCapability", WorkSubmissionSlot.capability(store.occupyingWork(target)));
+        } else {
+            attachFeedReqId(ctx, out);
         }
         return out;
     }
@@ -685,6 +694,31 @@ public final class WorksApi {
 
     private boolean hiddenBetween(long a, long b) {
         return blockService != null && blockService.hidden(a, b);
+    }
+
+    /** 他人墙上的网格快照。列出不计 n；点进全屏再换 immersive。看自己的墙不签。 */
+    private void attachFeedReqId(RequestContext ctx, Map<String, Object> page) {
+        if (feedRequests == null) {
+            return;
+        }
+        Object items = page.get("items");
+        if (!(items instanceof List<?> list) || list.isEmpty()) {
+            return;
+        }
+        List<String> ids = new ArrayList<>(list.size());
+        for (Object o : list) {
+            if (o instanceof Map<?, ?> m) {
+                Object id = m.get("id");
+                if (id != null) {
+                    ids.add(String.valueOf(id));
+                }
+            }
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        page.put("reqId", feedRequests.register(ctx.accountId(),
+                EchoApi.PLAZA_FEED_KIND, EchoApi.PLAZA_FEED_SURFACE, ids, Set.of(), "", ""));
     }
 
     private Map<String, Object> page(List<Object> items, RequestContext ctx) {
