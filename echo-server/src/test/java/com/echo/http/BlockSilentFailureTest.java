@@ -53,6 +53,9 @@ class BlockSilentFailureTest {
             p.accountId = id;
             p.deviceId = "dev-" + id;
             p.nickname = "u" + id;
+            // AccountProfile.guest 默认 true，不关掉就会被绑定闸拦在记得/献花之前。
+            // 本类测的是拉黑的静默失败，不是游客准入。
+            p.guest = false;
             store.putProfile(p);
         }
         // 作者的公开窗口

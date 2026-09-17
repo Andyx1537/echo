@@ -3,12 +3,15 @@ package com.echo.http;
 import com.aengine.util.id.IDGenerator;
 import com.echo.http.governance.BlockService;
 import com.echo.http.governance.BlockStore;
+import com.echo.http.model.ModerationModels.CardStatus;
+import com.echo.http.model.ModerationModels.MemoryCard;
 import com.echo.http.model.Models.AccountProfile;
 import com.echo.http.model.Models.LifeBookItem;
 import com.echo.http.model.Models.PetProfile;
 import com.echo.http.model.Models.Postcard;
 import com.echo.http.model.Models.RelationEntry;
 import com.echo.http.store.InMemoryEchoStore;
+import com.echo.http.store.InMemoryModerationStore;
 import com.echo.http.visibility.ViewerRole;
 import com.echo.http.visibility.VisibilityMatrix;
 import com.echo.http.visibility.WindowBlock;
@@ -53,6 +56,9 @@ class WindowVisibilityTrimTest {
     private BlockService blocks;
     private String windowId;
     private String privateWindowId;
+    private InMemoryModerationStore cards;
+    /** 广场上那张卡的 id。断言按它判，不要按窗 id 判——广场发的是卡。 */
+    private long plazaCard;
 
     @BeforeEach
     void setUp() {
@@ -70,11 +76,16 @@ class WindowVisibilityTrimTest {
             p.deviceId = "dev-" + id;
             p.nickname = "u" + id;
             p.avatar = "grad-" + id;
+            // AccountProfile.guest 默认 true，不关掉写操作会被绑定闸拦下。
+            // 本类测的是可见性裁剪，不是游客准入。
+            p.guest = false;
             store.putProfile(p);
         }
 
         PetProfile pet = new PetProfile();
-        pet.petId = "pet-" + OWNER;
+        // 窗 id 必须是纯数字串，与生产一致（EchoApi 建档走 pet.petId = newId()）。
+        // plaza 用 store.petById(String.valueOf(card.petId)) 反查窗——带 pet- 前缀就查不到。
+        pet.petId = String.valueOf(OWNER);
         pet.ownerAccountId = OWNER;
         pet.name = "麦麦";
         pet.species = "金毛";
@@ -86,7 +97,7 @@ class WindowVisibilityTrimTest {
         seedPostcards(windowId);
 
         PetProfile hidden = new PetProfile();
-        hidden.petId = "pet-" + PRIVATE_OWNER;
+        hidden.petId = String.valueOf(PRIVATE_OWNER);
         hidden.ownerAccountId = PRIVATE_OWNER;
         hidden.name = "橘子";
         hidden.species = "橘猫";
@@ -99,6 +110,25 @@ class WindowVisibilityTrimTest {
         relate(OWNER, FRIEND);   // OWNER 认 FRIEND 是亲友 → FRIEND 对这扇窗是 FRIEND
         relate(FRIEND, OWNER);   // FRIEND 的名单里有 OWNER → 才会出现在 FRIEND 的 /relations 里
         relate(STRANGER, OWNER); // 🔴 单向：STRANGER 把 OWNER 加进自己名单，但 OWNER 没认他
+
+        // 广场发的是卡不是窗。此前没装 cardStore，/plaza 恒为空，挡内容那条会假绿。
+        cards = new InMemoryModerationStore(ids);
+        api.setCardStore(cards);
+        plazaCard = seedPublicCard(OWNER, pet.petId);
+    }
+
+    /** 往 OWNER 的窗上放一张已公开的卡，让 /plaza 有东西可发。 */
+    private long seedPublicCard(long ownerId, String petId) {
+        MemoryCard card = new MemoryCard();
+        card.id = 900_000L + ownerId;
+        card.ownerId = ownerId;
+        card.petId = Long.parseLong(petId);
+        card.status = CardStatus.PUBLIC;
+        card.visibilityIntent = "public";
+        card.title = "阳台上的下午";
+        card.publishedAt = 1_700_000_000_000L;
+        cards.putCard(card);
+        return card.id;
     }
 
     private void seedPostcards(String petId) {
@@ -313,19 +343,27 @@ class WindowVisibilityTrimTest {
 
     // ==================================================== 拉黑挡内容
 
-    /** 拉黑挡住了「人」，此前没挡住「内容」：被拉黑方照样能在瀑布上看到对方的公开窗。 */
+    /**
+     * 拉黑挡住了「人」，此前没挡住「内容」：被拉黑方照样能在瀑布上看到对方的公开内容。
+     *
+     * <p>断言按卡 id 判，不是窗 id：广场发的是卡。前置「拉黑前看得见」不能省——
+     * 没有它，「挡住了」和「本来就没有」都是空列表，这条会假绿。</p>
+     */
     @Test
     @SuppressWarnings("unchecked")
     void plazaHidesWindowsOfBlockedCounterparties() {
+        String cardId = String.valueOf(plazaCard);
         Map<String, Object> before = (Map<String, Object>) call("GET", "/plaza", STRANGER);
-        assertThat(rawJson(before.get("items"))).contains(windowId);
+        assertThat(rawJson(before.get("items")))
+                .as("前置：拉黑之前这张公开卡必须看得见，否则下面那句挡没挡都成立")
+                .contains(cardId);
 
         blocks.block(OWNER, STRANGER);
 
         Map<String, Object> after = (Map<String, Object>) call("GET", "/plaza", STRANGER);
         assertThat(rawJson(after.get("items")))
-                .as("🔴 任一方向拉黑后，对方的公开窗不该再出现在我的瀑布上")
-                .doesNotContain(windowId);
+                .as("🔴 任一方向拉黑后，对方的公开内容不该再出现在我的瀑布上")
+                .doesNotContain(cardId);
     }
 
     /** 详情页同理：只过 {@code canView} 会让被拉黑方照样点进去。 */
