@@ -36,6 +36,8 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
     private static final String[] EMOJIS = {"🐾", "🌤️", "✨"};
     private static final String FALLBACK_SIGNATURE = "从熟悉的日常，慢慢认出它";
     private static final int MAX_SIGNATURE_CHARS = 80;
+    /** 旁白模板版本。锚点必须记下，不像时才能追是模板还是模型。 */
+    public static final String PROMPT_TEMPLATE_VERSION = "private-onboarding-v2";
 
     private final ILlmClient llm;
     private final IDGenerator ids;
@@ -102,9 +104,13 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
     }
 
     static String onboardingPreviewPrompt(OnboardingAggregate.Anchor anchor, String adjustmentCode) {
+        String subjectSnap = anchor == null ? null : anchor.subjectSnapshot;
         return "private-pet-onboarding\n"
                 + "请只输出一句不超过40字的中文旁白，写这只宠物第一幅画面。不要解释，不要英文，不要JSON。\n"
-                + "facts=" + factLine(anchor == null ? null : anchor.answerSnapshot) + "\n"
+                + "subject=" + subjectLine(subjectSnap) + "\n"
+                + "assets=" + assetLine(anchor == null ? null : anchor.assetSnapshot, selectedAssetId(subjectSnap)) + "\n"
+                + "answers=" + answerCodes(anchor == null ? null : anchor.answerSnapshot) + "\n"
+                + "facts=" + factCodes(anchor == null ? null : anchor.factSnapshot) + "\n"
                 + "adjustment=" + (adjustmentCode == null ? "" : adjustmentCode);
     }
 
@@ -132,34 +138,106 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
         return text.length() > 24 && han * 4 < text.length();
     }
 
-    static String factLine(String answerSnapshot) {
-        if (answerSnapshot == null || answerSnapshot.isBlank()) {
-            return "";
-        }
-        try {
-            JsonElement parsed = JsonParser.parseString(answerSnapshot);
-            if (!parsed.isJsonArray()) {
-                return "";
+    static String answerCodes(String answerSnapshot) {
+        List<String> codes = new ArrayList<>();
+        for (JsonElement element : array(answerSnapshot)) {
+            if (!element.isJsonObject()) {
+                continue;
             }
-            List<String> codes = new ArrayList<>();
-            for (JsonElement element : parsed.getAsJsonArray()) {
-                if (!element.isJsonObject()) {
-                    continue;
-                }
-                JsonObject answer = element.getAsJsonObject();
-                if (!answer.has("answerCodes") || !answer.get("answerCodes").isJsonArray()) {
-                    continue;
-                }
-                for (JsonElement code : answer.getAsJsonArray("answerCodes")) {
-                    if (code.isJsonPrimitive() && !code.getAsString().isBlank()) {
-                        codes.add(code.getAsString());
-                    }
+            JsonObject answer = element.getAsJsonObject();
+            if (!answer.has("answerCodes") || !answer.get("answerCodes").isJsonArray()) {
+                continue;
+            }
+            for (JsonElement code : answer.getAsJsonArray("answerCodes")) {
+                if (code.isJsonPrimitive() && !code.getAsString().isBlank()) {
+                    codes.add(code.getAsString());
                 }
             }
-            return String.join(",", codes);
-        } catch (RuntimeException ignored) {
+        }
+        return String.join(",", codes);
+    }
+
+    static String subjectLine(String subjectSnapshot) {
+        JsonObject selected = null;
+        for (JsonElement element : array(subjectSnapshot)) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject subject = element.getAsJsonObject();
+            if (selected == null) {
+                selected = subject;
+            }
+            if (subject.has("userSelected") && subject.get("userSelected").getAsBoolean()) {
+                selected = subject;
+                break;
+            }
+        }
+        if (selected == null) {
             return "";
         }
+        String type = text(selected, "modelType");
+        String species = text(selected, "species");
+        if (type.isEmpty()) {
+            return species;
+        }
+        return species.isEmpty() ? type : type + "/" + species;
+    }
+
+    static String assetLine(String assetSnapshot, String selectedAssetId) {
+        for (JsonElement element : array(assetSnapshot)) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject asset = element.getAsJsonObject();
+            if (selectedAssetId != null && !selectedAssetId.equals(text(asset, "assetId"))) {
+                continue;
+            }
+            String media = text(asset, "mediaType");
+            if (!media.isEmpty()) {
+                return media;
+            }
+        }
+        return "";
+    }
+
+    static String factCodes(String factSnapshot) {
+        List<String> codes = new ArrayList<>();
+        for (JsonElement element : array(factSnapshot)) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject fact = element.getAsJsonObject();
+            if (!allowsPrivateGeneration(fact)) {
+                continue;
+            }
+            String dimension = text(fact, "dimension");
+            String value = text(fact, "value");
+            if (dimension.isEmpty() || value.isEmpty()) {
+                continue;
+            }
+            codes.add(dimension + ":" + value);
+        }
+        return String.join(",", codes);
+    }
+
+    private static boolean allowsPrivateGeneration(JsonObject fact) {
+        if (!fact.has("allowedUses") || !fact.get("allowedUses").isJsonArray()) {
+            return false;
+        }
+        for (JsonElement use : fact.getAsJsonArray("allowedUses")) {
+            if (use.isJsonPrimitive() && "private_generation".equals(use.getAsString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String text(JsonObject object, String key) {
+        if (!object.has(key) || !object.get(key).isJsonPrimitive()) {
+            return "";
+        }
+        String value = object.get(key).getAsString();
+        return value == null ? "" : value.trim();
     }
 
     private List<String> liveImageUrls(OnboardingAggregate.Anchor anchor) {
