@@ -183,27 +183,19 @@ public final class ExecutorOnboardingGenerationPort implements OnboardingGenerat
     }
 
     private String persist(GeneratedImage image) {
-        boolean canPublish = mediaPublisher != null && provenance != null && provenance.ready();
-        if (!canPublish) {
-            if (image.url() != null && !image.url().isBlank()) {
-                log.warn("[imggen] 未配置服务提供者编码，定妆图暂用供应商临时地址，不落盘");
-                return image.url();
-            }
-            throw new IllegalStateException("定妆图没有可展示的地址");
+        if (mediaPublisher == null || provenance == null || !provenance.ready()) {
+            throw new IllegalStateException("定妆图还不能落盘：服务提供者编码没配好。");
         }
         byte[] data = image.data();
-        if (data == null && image.url() != null) {
+        if ((data == null || data.length == 0) && image.url() != null && !image.url().isBlank()) {
             data = download(image.url());
         }
-        if (data != null) {
-            IStorage.Stored stored = mediaPublisher.publish(String.valueOf(ids.nextId()), data,
-                    image.contentType() == null ? "image/png" : image.contentType(), "candidate.png");
-            return stored.url();
+        if (data == null || data.length == 0) {
+            throw new IllegalStateException("定妆图没有可落盘的字节");
         }
-        if (image.url() != null && !image.url().isBlank()) {
-            return image.url();
-        }
-        throw new IllegalStateException("定妆图没有可展示的地址");
+        IStorage.Stored stored = mediaPublisher.publish(String.valueOf(ids.nextId()), data,
+                image.contentType() == null ? "image/png" : image.contentType(), "candidate.png");
+        return stored.url();
     }
 
     private byte[] download(String url) {
