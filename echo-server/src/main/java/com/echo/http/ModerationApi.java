@@ -561,6 +561,10 @@ public final class ModerationApi {
             m.put("reviewedAt", w.reviewedAt);
         }
         m.put("createdAt", t.createdAt);
+        // 作品工单没有风险档，按人工队列 4h。前端不算时差。
+        long slaDueAt = t.createdAt + SLA_NORMAL_MS;
+        m.put("slaDueAt", slaDueAt);
+        m.put("slaBreached", t.handledAt == null && System.currentTimeMillis() > slaDueAt);
         return m;
     }
 
