@@ -77,6 +77,7 @@ public final class ModerationApi {
     public void register(Router r) {
         // 运营侧 6 条（/admin/**，独立鉴权链）
         r.add("GET", "/admin/moderation/queue", this::queue);
+        r.add("GET", "/admin/moderation/settings", this::settings);
         r.add("GET", "/admin/moderation/:id", this::detail);
         r.add("POST", "/admin/moderation/:id/handle", this::handle);
         r.add("POST", "/admin/appeals/:id/handle", this::handleAppeal);
@@ -280,6 +281,12 @@ public final class ModerationApi {
                 ? null : String.valueOf(rows.get(rows.size() - 1).id));
     }
 
+    /** {@code GET /admin/moderation/settings} —— 当前先审/先发档。须在 {@code :id} 之前注册。 */
+    private Object settings(RequestContext ctx) {
+        adminRoles.requireRead(ctx.accountId());
+        return settingView(store.setting());
+    }
+
     /** {@code PATCH /admin/moderation/settings} —— 先审后发 / 先发后审开关（TC-MOD-05）。 */
     private Object updateSettings(RequestContext ctx) {
         adminRoles.requireSupervisor(ctx.accountId());
@@ -290,13 +297,15 @@ public final class ModerationApi {
         }
         String scopeJson = ctx.body().has("scope") && !ctx.body().get("scope").isJsonNull()
                 ? ctx.body().get("scope").toString() : null;
-        ModerationSetting s = store.updateSetting(mode, scopeJson, ctx.accountId(),
-                System.currentTimeMillis());
+        return settingView(store.updateSetting(mode, scopeJson, ctx.accountId(),
+                System.currentTimeMillis()));
+    }
 
+    private static Map<String, Object> settingView(ModerationSetting s) {
         Map<String, Object> data = Json.map();
-        data.put("mode", s.mode);
-        data.put("updatedAt", s.updatedAt);
-        data.put("updatedBy", String.valueOf(s.updatedBy));
+        data.put("mode", s == null || isBlank(s.mode) ? ModerationSetting.REVIEW_FIRST : s.mode);
+        data.put("updatedAt", s == null || s.updatedAt == 0 ? null : s.updatedAt);
+        data.put("updatedBy", s == null || s.updatedBy == 0 ? null : String.valueOf(s.updatedBy));
         return data;
     }
 

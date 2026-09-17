@@ -389,6 +389,8 @@ class ModerationApiTest {
         Map<String, Object> ok = invoke("PATCH", "/admin/moderation/settings", SUPERVISOR, mode);
         assertThat(ok.get("mode")).isEqualTo(ModerationSetting.PUBLISH_FIRST);
         assertThat(store.setting().mode).isEqualTo(ModerationSetting.PUBLISH_FIRST);
+        Map<String, Object> current = invoke("GET", "/admin/moderation/settings", REVIEWER, null);
+        assertThat(current.get("mode")).isEqualTo(ModerationSetting.PUBLISH_FIRST);
         // 开关变更也要留审计
         assertThat(store.auditLogs("config", "moderation.settings"))
                 .extracting(a -> a.action).contains(AuditAction.SETTINGS_UPDATE);
